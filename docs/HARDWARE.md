@@ -2,13 +2,13 @@
 
 ## Die kurze Antwort
 
-Das **Wanptek GA3010H** (30 V / 10 A) hat **keine Datenschnittstelle**. Die USB-A- und USB-C-Buchsen vorne sind reine Ladebuchsen, und „programmable“ bezieht sich nur auf die Speicherplätze M1–M3. Es gibt kein USB-Daten, kein RS232, kein RS485 und kein Modbus. Auslesen lässt es sich also nicht direkt.
+Das **Wanptek DPS3010U** (30 V / 10 A) hat **keine Datenschnittstelle**. Die USB-Buchsen vorne (USB-A, je nach Version auch USB-C) sind reine 18-W-Schnellladeausgänge, dahinter sitzt nur ein Ladechip und kein USB-Seriell-Wandler. Es gibt kein USB-Daten, kein RS232, kein RS485, kein Modbus und keine PC-Software, und die LEDs für CV/CC/OCP sind nur Anzeigen. Auslesen lässt es sich also nicht direkt. Vorsicht bei Suchergebnissen zu „DPS5005“ oder „DPS3005“: Das sind Module eines anderen Herstellers (RDTech/Riden), deren Modbus-Protokoll gilt nicht für Wanptek.
 
 **Es geht trotzdem**, und zwar besser als gedacht: Man setzt ein kleines **Messmodul zwischen Netzteil und Gerät**. Das misst Spannung und Strom am Ausgang direkt, 100-mal pro Sekunde und genauer als die Anzeige des Netzteils, und schickt die Werte per USB an die App.
 
 ```
  Wanptek  (+) ───► [INA228: V+ ─ Shunt ─ V−] ───► (+)  Gerät (Mainboard, Laptop …)
- GA3010H  (−) ──────────────────────────────────► (−)
+ DPS3010U (−) ──────────────────────────────────► (−)
                          │
                  INA228 + ESP32 ──USB──► Mac (PowerMeter-App → OBS)
 ```
@@ -37,7 +37,7 @@ Daraus erkennt die App **CV/CC**, **Spannungseinbrüche** und **Kurzschlüsse**.
 
 Der **eingebaute Shunt** (15 mΩ) reicht für bis zu ca. **5 A Dauerstrom**. Ein externer Shunt ist dafür **nicht** nötig. Er würde auf dem Adafruit-Board parallel zum eingebauten liegen und die Messung verfälschen, solange der eingebaute nicht ausgelötet ist (siehe „Mehr als 5 A“ unten).
 
-**Auflösung:** etwa 0,2 mV bei der Spannung und etwa 0,02 mA beim Strom. Das ist deutlich feiner als die Anzeige des Netzteils (10 mV / 10 mA).
+**Auflösung:** etwa 0,2 mV bei der Spannung und etwa 0,02 mA beim Strom. Das ist deutlich feiner als die Anzeige des Netzteils (10 mV / 1 mA).
 
 ## Verdrahtung
 
@@ -57,9 +57,10 @@ Board so hinlegen: Bauteile nach oben, Schraubklemme zu dir hin. Dann ist an der
 - Die Stiftleiste liegt dem Board lose bei. Gebraucht wird nur der Stift **GND**, das ist der einzige Lötjob.
 - SDA/SCL-Pins sind in der Firmware änderbar (`PIN_SDA`, `PIN_SCL`).
 - Spannung vom Netzteil darf **nie** an einen Pin des ESP32 kommen, nur an die Schraubklemme des INA228.
-- Strombegrenzung am Netzteil höchstens **5 A** einstellen.
+- Strombegrenzung am Netzteil höchstens **5 A** einstellen. Das DPS3010U kann bis 10 A liefern. So stellst du die Grenze ein: Ausgang mit einem dicken Kabel direkt am Netzteil kurzschließen, Ausgang an, A-Regler drehen, bis höchstens 5,00 A angezeigt werden, Ausgang aus, Kabel ab.
+- Die grüne **GND**-Klemme am Netzteil (Schutzerde) bleibt frei, die Box nutzt nur + und −.
 
-> **Masse-Hinweis:** Über USB ist danach der Minuspol des Netzteils mit der Masse des Macs verbunden. Beim Wanptek (Ausgang potentialfrei) ist das unkritisch. Hängt am Prüfling aber gleichzeitig etwas Geerdetes (Oszilloskop, anderes Netzteil, geerdetes Gerät), nimm den **USB-Isolator** dazwischen. So vermeidest du Masseschleifen und schützt den Mac-Port.
+> **Masse-Hinweis:** Über USB ist danach der Minuspol des Netzteils mit der Masse des Macs verbunden. Beim Wanptek ist der Ausgang normalerweise potentialfrei, dann ist das unkritisch. Prüfen: Netzstecker ziehen und mit dem Multimeter Durchgang zwischen **−** und der grünen **GND**-Klemme messen. Kein Durchgang heißt potentialfrei. Hängt am Prüfling aber gleichzeitig etwas Geerdetes (Oszilloskop, anderes Netzteil, geerdetes Gerät), nimm den **USB-Isolator** dazwischen. So vermeidest du Masseschleifen und schützt den Mac-Port.
 
 ### Mehr als 5 A (bis 10 A)
 
@@ -90,6 +91,6 @@ Andere INA228-Boards (z. B. blaue „CJMCU-228“-Klone mit R010-Shunt) gehen au
 
 ## Alternativen
 
-- **Netzteil mit Schnittstelle**: Ein Riden **RD6012/RD6018** (USB/WLAN, Modbus) liefert Soll-Werte und CV/CC direkt. Das kostet aber deutlich mehr und braucht noch einen Treiber in der App (lässt sich nachrüsten).
+- **Netzteil mit Schnittstelle** (statt des DPS3010U): z. B. Hanmatek **HM310P** (USB, Modbus RTU) oder Riden **RD6012/RD6018** (USB/WLAN, Modbus). Die liefern Sollwerte direkt. Dafür braucht die App noch einen eigenen Treiber (lässt sich nachrüsten).
 - **Kamera auf das Display**: In OBS sowieso möglich, aber ohne Graphen, Ereignisse und Genauigkeit.
 - Ein beliebiges anderes Messmodul geht auch, solange es pro Zeile `Spannung,Strom` über USB ausgibt. Die App versteht das Format direkt.
