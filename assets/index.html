@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<title>PowerMeter</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  body { font-family: -apple-system, "Helvetica Neue", Arial, sans-serif; background: #15171c; color: #eef; margin: 0; padding: 24px; }
+  h1 { margin-top: 0; }
+  code { background: #23262e; padding: 2px 6px; border-radius: 4px; }
+  a { color: #4cc9f0; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 16px; }
+  .card { background: #1d2027; border-radius: 12px; padding: 12px; }
+  iframe { border: 0; width: 100%; height: 340px; background: repeating-conic-gradient(#333 0 25%, #444 0 50%) 0 0/20px 20px; border-radius: 8px; }
+</style>
+</head>
+<body>
+<h1>PowerMeter · OBS-Overlay</h1>
+<p>In OBS: <b>Quellen → + → Browser</b>, URL einfügen, Breite 700 / Höhe 400, „Benutzerdefiniertes CSS" leeren.</p>
+<div class="grid">
+  <div class="card"><p>Standard-Kachel: <code><a href="/overlay">/overlay</a></code></p><iframe src="/overlay"></iframe></div>
+  <div class="card"><p>Leiste unten: <code><a href="/overlay?layout=bar&show=v,i,p,mode,graph,dmm">/overlay?layout=bar&amp;show=v,i,p,mode,graph,dmm</a></code></p><iframe src="/overlay?layout=bar&show=v,i,p,mode,graph,dmm"></iframe></div>
+  <div class="card"><p>Alles inkl. Energie & Ereignisse: <code><a href="/overlay?show=v,i,p,mode,set,graph,dmm,energy,events&graph=v,i,p">/overlay?show=v,i,p,mode,set,graph,dmm,energy,events&amp;graph=v,i,p</a></code></p><iframe src="/overlay?show=v,i,p,mode,set,graph,dmm,energy,events&graph=v,i,p"></iframe></div>
+  <div class="card"><p>Nur Multimeter: <code><a href="/overlay?show=dmm&scale=1.4">/overlay?show=dmm&amp;scale=1.4</a></code></p><iframe src="/overlay?show=dmm&scale=1.4"></iframe></div>
+</div>
+<p>Rohdaten: <code><a href="/api/live">/api/live</a></code> (JSON) · Stream: <code>/events</code> (Server-Sent Events)</p>
+</body>
+</html>

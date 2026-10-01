@@ -1,0 +1,32 @@
+name: macOS
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Tests
+        run: cargo test
+      - name: Bundle PowerMeter.app
+        run: |
+          ./scripts/bundle_macos.sh
+          cd dist && ditto -c -k --keepParent PowerMeter.app PowerMeter-macOS.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PowerMeter-macOS
+          path: dist/PowerMeter-macOS.zip
