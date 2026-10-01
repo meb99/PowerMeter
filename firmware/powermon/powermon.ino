@@ -1,7 +1,7 @@
 // PowerMon – in-line DC power meter for the PowerMeter app.
 //
 // Hardware: any Arduino-compatible board with native USB (ESP32-C3/S3,
-// Raspberry Pi Pico, ...) + INA228 breakout + shunt.
+// Raspberry Pi Pico, ...) + INA228 breakout (Adafruit #5832 recommended).
 // Wiring and parts list: docs/HARDWARE.md
 //
 // Streams one line per sample over USB:
@@ -16,10 +16,11 @@
 // ---------------------------------------------------------------- settings --
 
 // Shunt resistance in ohms.
-//   external 10 A / 75 mV shunt      -> 0.0075
-//   Adafruit INA228 board (15 mΩ)    -> 0.015
-//   R010 shunt on blue clone boards  -> 0.010
-const float SHUNT_OHMS = 0.0075f;
+//   Adafruit INA228 board, onboard shunt (15 mΩ, up to ~5 A)  -> 0.015
+//   R010 shunt on blue clone boards                           -> 0.010
+//   external 10 A / 75 mV shunt                               -> 0.0075
+//     (only with the onboard shunt removed, otherwise both are in parallel)
+const float SHUNT_OHMS = 0.015f;
 
 const uint8_t INA_ADDR = 0x40;  // A0 = A1 = GND
 

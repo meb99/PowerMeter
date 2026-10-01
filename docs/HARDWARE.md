@@ -7,9 +7,9 @@ Das **Wanptek GA3010H** (30 V / 10 A) hat **keine Datenschnittstelle**. Die USB-
 **Es geht trotzdem**, und zwar besser als gedacht: Man setzt ein kleines **Messmodul zwischen Netzteil und Gerät**. Das misst Spannung und Strom am Ausgang direkt, 100-mal pro Sekunde und genauer als die Anzeige des Netzteils, und schickt die Werte per USB an die App.
 
 ```
- Wanptek  (+) ──────► [Shunt]──────► (+)  Gerät (Mainboard, Laptop …)
- GA3010H  (−) ─────────┬───────────► (−)
-                       │
+ Wanptek  (+) ───► [INA228: V+ ─ Shunt ─ V−] ───► (+)  Gerät (Mainboard, Laptop …)
+ GA3010H  (−) ──────────────────────────────────► (−)
+                         │
                  INA228 + ESP32 ──USB──► Mac (PowerMeter-App → OBS)
 ```
 
@@ -21,41 +21,62 @@ Was das Messmodul **nicht** kann: die eingestellten Knopfwerte lesen (Soll-Spann
 
 Daraus erkennt die App **CV/CC**, **Spannungseinbrüche** und **Kurzschlüsse**.
 
-## Einkaufsliste (Empfehlung, ca. 25–35 €)
+## Einkaufsliste (Empfehlung, ca. 30–45 €)
 
 | Teil | Wofür | ca. Preis |
 |---|---|---|
-| **ESP32-C3 SuperMini** (oder ESP32-S3 / Raspberry Pi Pico) | Mikrocontroller mit USB direkt am Chip | 3–6 € |
-| **INA228-Modul** (Adafruit #5832 oder „CJMCU-228“-Klon) | 20-Bit-Messchip für Spannung und Strom, bis 85 V | 5–15 € |
-| **Shunt 10 A / 75 mV** (z. B. „FL-2 10A 75mV“) | Messwiderstand für volle 10 A | 4–8 € |
-| 4 × **4-mm-Polklemmen/Bananenbuchsen** (2 × rot, 2 × schwarz) | Netzteil rein, Gerät raus | 4–6 € |
-| Silikonkabel **1,5 mm²** (rot/schwarz), Dupont-Kabel | Starkstrom- und Signalwege | 3–5 € |
-| Kleines Gehäuse | | 3–5 € |
+| **ESP32-C3 SuperMini**, Variante „Soldered“ (oder ESP32-S3 / Raspberry Pi Pico) | Mikrocontroller mit USB direkt am Chip | 3–6 € |
+| **Adafruit INA228** (Produkt #5832) | 20-Bit-Messchip für Spannung und Strom, bis 85 V, mit eingebautem 15-mΩ-Shunt, Schraubklemme und STEMMA-QT-Buchse | 12–16 € |
+| **STEMMA-QT-Kabel** auf 4 Dupont-Buchsen | INA228 ↔ ESP32 ohne Löten | 1–3 € |
+| 4 × **4-mm-Polklemmen/Bananenbuchsen** (2 × rot, 2 × schwarz) | Netzteil rein, Gerät raus | 2–4 € |
+| Silikonkabel **1,0 mm² / AWG 18** (rot/schwarz) | Stromwege in der Box; 1,5 mm² passt nicht mehr gut in die 3,5-mm-Schraubklemme | 3–5 € |
+| Dupont-Kabelset Buchse–Buchse | die zwei dünnen Kabel für VBus und GND | 1–2 € |
+| 2 × Laborkabel Banane–Banane, 4 mm | Netzteil → Box | 3–6 € |
+| Kleines Gehäuse (ca. 100 × 60 × 40 mm) | | 3–5 € |
 | optional: **USB-Isolator ADuM3160** | Trennt Mac-Masse vom Messaufbau (siehe unten) | 8–12 € |
 
-**Nur bis ca. 5 A?** Dann reicht der Shunt, der schon auf dem INA228-Board sitzt. Der externe Shunt entfällt, du trägst nur dessen Wert in der Firmware ein (Adafruit: 15 mΩ, blaue Klone: meist R010 = 10 mΩ).
+Der **eingebaute Shunt** (15 mΩ) reicht für bis zu ca. **5 A Dauerstrom**. Ein externer Shunt ist dafür **nicht** nötig. Er würde auf dem Adafruit-Board parallel zum eingebauten liegen und die Messung verfälschen, solange der eingebaute nicht ausgelötet ist (siehe „Mehr als 5 A“ unten).
 
-**Auflösung mit dem 75-mV-Shunt:** etwa 0,2 mV bei der Spannung und etwa 0,04 mA beim Strom. Das ist feiner als die Anzeige des Netzteils (10 mV / 10 mA).
+**Auflösung:** etwa 0,2 mV bei der Spannung und etwa 0,02 mA beim Strom. Das ist deutlich feiner als die Anzeige des Netzteils (10 mV / 10 mA).
 
 ## Verdrahtung
 
-1. **Netzteil +** → Shunt-Anschluss A. Shunt-Anschluss B → **Ausgang +** (Gerät).
-2. **Netzteil −** → **Ausgang −**, durchgehend mit dickem Kabel.
-3. INA228 **IN+** an Shunt-Seite A, **IN−** an Shunt-Seite B. Die Messleitungen direkt an die kleinen Schrauben des Shunts führen, nicht an die dicken Strombolzen.
-4. INA228 **VBUS** an **IN−**. Damit wird die Spannung gemessen, die am Gerät ankommt. Viele Boards haben das schon per Lötbrücke verbunden.
-5. INA228 **GND** an **Netzteil −**, **VCC** an **3V3** vom ESP32.
-6. **SDA → GPIO 8**, **SCL → GPIO 9** (ESP32-C3 SuperMini, in der Firmware änderbar).
-7. ESP32 per USB-C an den Mac.
+Board so hinlegen: Bauteile nach oben, Schraubklemme zu dir hin. Dann ist an der Schraubklemme **links V+, Mitte VBus, rechts V−**. Der Aufdruck dazu steht auf der Rückseite des Boards.
+
+| Von | Nach | Kabel |
+|---|---|---|
+| Polklemme + (vom Netzteil) | INA228 Schraube **V+** | dick, rot |
+| INA228 Schraube **V−** | Polklemme + (zum Gerät) | dick, rot |
+| Polklemme − (vom Netzteil) | Polklemme − (zum Gerät) | dick, schwarz |
+| INA228 Schraube **VBus** | Polklemme + (zum Gerät) | dünn, rot |
+| INA228 Stift **GND** (Stiftleiste anlöten) | Polklemme − (vom Netzteil) | dünn, schwarz |
+| INA228 STEMMA QT | ESP32 **3.3** (rot), **G** (schwarz), **GPIO 8** (blau, SDA), **GPIO 9** (gelb, SCL) | STEMMA-QT-Kabel |
+| ESP32 USB-C | Mac | USB-C-Datenkabel |
+
+- **VBus** ist auf dem Adafruit-Board ab Werk nicht verbunden (Lötbrücke SJ1 offen). Das dünne Kabel zum Ausgang + misst die Spannung, die am Gerät ankommt.
+- Die Stiftleiste liegt dem Board lose bei. Gebraucht wird nur der Stift **GND**, das ist der einzige Lötjob.
+- SDA/SCL-Pins sind in der Firmware änderbar (`PIN_SDA`, `PIN_SCL`).
+- Spannung vom Netzteil darf **nie** an einen Pin des ESP32 kommen, nur an die Schraubklemme des INA228.
+- Strombegrenzung am Netzteil höchstens **5 A** einstellen.
 
 > **Masse-Hinweis:** Über USB ist danach der Minuspol des Netzteils mit der Masse des Macs verbunden. Beim Wanptek (Ausgang potentialfrei) ist das unkritisch. Hängt am Prüfling aber gleichzeitig etwas Geerdetes (Oszilloskop, anderes Netzteil, geerdetes Gerät), nimm den **USB-Isolator** dazwischen. So vermeidest du Masseschleifen und schützt den Mac-Port.
+
+### Mehr als 5 A (bis 10 A)
+
+1. Den eingebauten Shunt **R1** vom INA228-Board auslöten.
+2. Externen Shunt **10 A / 75 mV** in die Plus-Leitung setzen (Netzteil + → Shunt → Ausgang +, mit 1,5–2,5 mm²).
+3. Zwei dünne Messkabel von den kleinen Schrauben des Shunts an **V+** (Netzteilseite) und **V−** (Geräteseite) der Schraubklemme.
+4. VBus und GND bleiben wie oben.
+5. In der Firmware `SHUNT_OHMS = 0.0075` eintragen.
+
+Andere INA228-Boards (z. B. blaue „CJMCU-228“-Klone mit R010-Shunt) gehen auch. Dort `SHUNT_OHMS` auf `0.010` setzen und die Beschriftung des Boards prüfen.
 
 ## Firmware aufspielen
 
 1. Arduino IDE installieren und den Boardsupport „esp32 by Espressif“ hinzufügen.
-2. `firmware/powermon/powermon.ino` öffnen.
-3. Oben `SHUNT_OHMS` an deinen Shunt anpassen (`0.0075` für 10 A / 75 mV).
-4. Board **ESP32C3 Dev Module** wählen und **USB CDC On Boot: Enabled** setzen. Dann hochladen.
-5. Zum Test im seriellen Monitor schauen: Es sollten Zeilen wie `PM,123456,19.00012,0.000041` erscheinen.
+2. `firmware/powermon/powermon.ino` öffnen. `SHUNT_OHMS` steht schon auf `0.015` für das Adafruit-Board.
+3. Board **ESP32C3 Dev Module** wählen und **USB CDC On Boot: Enabled** setzen. Dann hochladen. Klappt das nicht: **BOOT** gedrückt halten, USB einstecken, loslassen, nochmal hochladen.
+4. Zum Test im seriellen Monitor schauen: Es sollten Zeilen wie `PM,123456,19.00012,0.000041` erscheinen.
 
 ## In der App
 
