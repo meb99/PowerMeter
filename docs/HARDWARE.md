@@ -89,8 +89,54 @@ Andere INA228-Boards (z. B. blaue „CJMCU-228“-Klone mit R010-Shunt) gehen au
 
    Damit liegt das Messmodul auf der Genauigkeit des XDM1241.
 
+## OWON SPM6103 (oder andere SPM)
+
+Die OWON-SPM-Netzteile (SPM3051, SPM6053, SPM3103, SPM6103) haben eine USB-Schnittstelle und ein eingebautes Multimeter (4½ Stellen). Die App unterstützt sie direkt. Die SPE-Modelle (gleiches Netzteil ohne Multimeter) und baugleiche „multicomp pro MP7111…“ gehen auch.
+
+### Anschließen
+
+1. USB-B-Kabel vom Netzteil (Rückseite) an den Mac. Meist ist kein Treiber nötig: Der USB-Chip ist sehr wahrscheinlich ein CH340, den aktuelle macOS-Versionen selbst kennen.
+2. In der App oben bei **Netzteil** „OWON SPM (USB)“ wählen und den Port `cu.usbserial-…` auswählen, dann **Verbinden**. (Ist schon ein Port gespeichert, verbindet die App beim Wechsel sofort; ein anderer Port verbindet neu.)
+3. Für das eingebaute Multimeter bei **Multimeter** „Im Netzteil (OWON SPM)“ wählen.
+
+Die App probiert erst die eingestellte Baudrate (Standard 115200, ⚙ Einstellungen → OWON SPM) und, wenn keine Antwort kommt, die andere von 115200 und 9600. Klappt nur die andere, steht sie unten in der Statuszeile.
+
+### Was es liefert
+
+- Spannung, Strom und Leistung, etwa 10 Abfragen pro Sekunde.
+- Die eingestellten Werte direkt vom Gerät: Sollspannung, Strombegrenzung, OVP und OCP. Drehen am Netzteil zeigt die App nach etwa einer halben Sekunde. Nichts muss gelernt oder eingetragen werden.
+- CV/CC, Ausgang an/aus und Schutzabschaltungen (OVP, OCP, Übertemperatur). Eine Schutzabschaltung erscheint als Ereignis und als Warnung im Overlay.
+- Steuerung rechts unter **Netzteil-Einstellung**: Werte eintragen und mit **Übernehmen** (oder Enter) ans Netzteil schicken. Die Knöpfe 3,3 / 5 / 12 / 19 / 20 V füllen nur das Feld aus. Der große Knopf schaltet den Ausgang, Taste `O` schaltet ihn sofort aus.
+- Das Multimeter: V DC/AC, A DC/AC, Widerstand, Durchgang, Diode, Kapazität.
+
+Die App schaltet den Ausgang nie von selbst ein. Beim Verbinden, Trennen oder Beenden bleibt der Ausgang, wie er ist, damit ein Board in der Reparatur nicht plötzlich ohne Strom dasteht. Unter ⚙ Einstellungen lässt sich zusätzlich eine **Spannungsgrenze** setzen, über die die App nie einstellt.
+
+### Grenzen
+
+- Auflösung 10 mV und 1 mA, Genauigkeit beim Strom etwa ±20 mA. Für Ruhe- und Standby-Ströme im mA-Bereich ist das zu grob.
+- Das Netzteil erneuert seine eigenen Messwerte vermutlich nur etwa 3-mal pro Sekunde. Kurze Einbrüche (unter ca. 300 ms) sieht man damit nicht.
+- Das Multimeter hat keinen µA-Bereich (A DC: 200 mA und 10 A) und keine Frequenz, Periode oder Temperatur. Ein Wechsel der Messfunktion dauert knapp eine Sekunde.
+- Die Kalibrierung unter ⚙ Einstellungen gilt nur für die PowerMon-Box, nicht für das SPM.
+
+### Empfohlen: SPM und PowerMon-Box zusammen
+
+Die Box misst 100-mal pro Sekunde mit etwa 0,02 mA Auflösung, das SPM liefert Sollwerte, CV/CC, Steuerung und das Multimeter. Dafür die Box wie oben zwischen SPM und Gerät setzen, beide per USB an den Mac, und unter ⚙ Einstellungen → OWON SPM **Messwerte von der PowerMon-Box (100 Hz)** einschalten und den Port der Box wählen. Bei **Netzteil** bleibt „OWON SPM (USB)“ ausgewählt.
+
+### Erst einmal testen
+
+Bevor du dich auf das Gerät verlässt, im Terminal einmal lesen lassen (verstellt nichts, schickt nur Abfragen):
+
+```sh
+/Applications/PowerMeter.app/Contents/MacOS/PowerMeter --probe-spm /dev/cu.usbserial-1410   # Port anpassen; optional die Baudrate dahinter, z. B. 9600
+```
+
+Aus dem Quellcode geht dasselbe mit `cargo run --release -- --probe-spm /dev/cu.usbserial-1410`.
+
+Die Ausgabe zeigt das Modell, 50 Messungen mit Zeitstempel und wie viele davon neue Werte waren (also wie oft das Netzteil wirklich misst), dazu Sollwerte, OVP/OCP, Ausgang und Multimeter. Für eine aussagekräftige Messrate eine Last anschließen, deren Strom sich bewegt.
+
 ## Alternativen
 
-- **Netzteil mit Schnittstelle** (statt des DPS3010U): z. B. Hanmatek **HM310P** (USB, Modbus RTU) oder Riden **RD6012/RD6018** (USB/WLAN, Modbus). Die liefern Sollwerte direkt. Dafür braucht die App noch einen eigenen Treiber (lässt sich nachrüsten).
+- **OWON SPM** statt des DPS3010U: siehe oben, wird direkt unterstützt.
+- **Andere Netzteile mit Schnittstelle**: z. B. Hanmatek **HM310P** (USB, Modbus RTU) oder Riden **RD6012/RD6018** (USB/WLAN, Modbus). Die liefern Sollwerte auch direkt, dafür braucht die App aber noch einen eigenen Treiber (lässt sich nachrüsten).
 - **Kamera auf das Display**: In OBS sowieso möglich, aber ohne Graphen, Ereignisse und Genauigkeit.
 - Ein beliebiges anderes Messmodul geht auch, solange es pro Zeile `Spannung,Strom` über USB ausgibt. Die App versteht das Format direkt.

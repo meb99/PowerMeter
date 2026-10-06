@@ -41,6 +41,19 @@ pub struct Snapshot {
     pub i_set: Option<f64>,
     pub v_set_text: String,
     pub i_set_text: String,
+    /// A controllable supply (OWON SPM) is connected.
+    pub psu_connected: bool,
+    /// The voltage set point was read from the supply ("Soll"), not typed
+    /// in or learned.
+    pub set_from_device: bool,
+    /// The voltage set point is only learned ("≈ Soll").
+    pub set_learned: bool,
+    /// The current limit is only learned ("≈ Limit").
+    pub i_set_learned: bool,
+    /// Output state as reported by the supply.
+    pub output_on: Option<bool>,
+    /// "OVP", "OCP" … while a protection has switched the output off.
+    pub protection: Option<String>,
     pub energy_text: String,
     pub charge_text: String,
     pub peak_i_text: String,
@@ -67,6 +80,7 @@ impl Snapshot {
         let fresh_power = last.filter(|l| now - l.t < 2.0);
         let v_set = a.v_set_effective(&s.analysis);
         let i_set = a.i_limit(&s.analysis);
+        let psu = s.power.psu.as_ref();
         let last_event = a.events.iter().rev().find(|e| e.kind != EventKind::Marker).map(|e| {
             format!(
                 "{} {} · min {}",
@@ -96,6 +110,12 @@ impl Snapshot {
             i_set,
             v_set_text: v_set.map_or(String::new(), |v| format::fixed(v, 2)),
             i_set_text: i_set.map_or(String::new(), |i| format::fixed(i, 3)),
+            psu_connected: s.power.psu_conn.is_connected(),
+            set_from_device: a.device_vset().is_some(),
+            set_learned: a.v_set_is_learned(&s.analysis),
+            i_set_learned: a.i_set_is_learned(&s.analysis),
+            output_on: psu.and_then(|p| p.output_on),
+            protection: psu.and_then(|p| p.protection_text()),
             energy_text: if a.energy_wh < 1.0 {
                 format!("{:.2} mWh", a.energy_wh * 1000.0)
             } else {

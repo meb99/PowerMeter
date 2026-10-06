@@ -53,6 +53,8 @@
   .pill.CC { background: var(--cc); color: #fff; }
   .pill.OFF { background: var(--off); color: #fff; }
   .flag { font-family: var(--mono); font-weight: 800; font-size: 13px; padding: 2px 8px; border-radius: 6px; background: var(--cc); color: #fff; display: none; animation: blink 0.5s steps(2) infinite; }
+  .flag.off { background: var(--off); animation: none; }
+  .banner { margin: 2px 0 6px; padding: 4px 10px; border-radius: 8px; background: var(--cc); color: #fff; font-family: var(--mono); font-weight: 800; font-size: 14px; display: none; }
   @keyframes blink { 50% { opacity: 0.35; } }
   .spacer { flex: 1; }
   .set { font-family: var(--mono); font-size: 13px; color: var(--muted); text-transform: none; }
@@ -96,9 +98,11 @@
       <span class="pill" id="mode">--</span>
       <span class="flag" id="short">KURZSCHLUSS</span>
       <span class="flag" id="dip">EINBRUCH</span>
+      <span class="flag off" id="outoff">AUSGANG AUS</span>
       <span class="spacer"></span>
       <span class="set" id="set"></span>
     </div>
+    <div class="banner" id="prot"></div>
     <div class="readouts" id="readouts">
       <div class="row row-v" id="row-v"><span class="val" id="v">--.---</span><span class="unit">V</span></div>
       <div class="row row-i" id="row-i"><span class="val" id="i">-.----</span><span class="unit">A</span></div>
@@ -145,16 +149,20 @@
   function render(d) {
     last = d;
     $('panel').classList.toggle('stale', !d.power_connected && !d.dmm_connected);
-    $('panel').classList.toggle('alarm', d.short || d.dropout);
+    $('panel').classList.toggle('alarm', d.short || d.dropout || !!d.protection);
     $('v').textContent = d.v_text;
     $('i').textContent = d.i_text;
     $('p').textContent = d.p_text;
     const m = $('mode'); m.textContent = d.mode; m.className = 'pill ' + d.mode + (show.has('mode') ? '' : ' hidden');
     $('short').style.display = d.short ? 'inline-block' : 'none';
     $('dip').style.display = d.dropout && !d.short ? 'inline-block' : 'none';
+    $('outoff').style.display = d.output_on === false && !d.protection ? 'inline-block' : 'none';
+    $('prot').textContent = d.protection ? 'SCHUTZABSCHALTUNG · ' + d.protection : '';
+    $('prot').style.display = d.protection && powerVisible ? 'block' : 'none';
     const parts = [];
-    if (d.v_set_text) parts.push('Soll ' + d.v_set_text + ' V');
-    if (d.i_set_text) parts.push('Limit ' + d.i_set_text + ' A');
+    // "Soll" from the supply itself, "≈ Soll" when only learned
+    if (d.v_set_text) parts.push((d.set_learned ? '≈ Soll ' : 'Soll ') + d.v_set_text + ' V');
+    if (d.i_set_text) parts.push((d.i_set_learned ? '≈ Limit ' : 'Limit ') + d.i_set_text + ' A');
     $('set').textContent = parts.join(' · ');
     $('wh').textContent = d.energy_text;
     $('mah').textContent = d.charge_text;
