@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<title>PowerMeter Overlay</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  /*
+    URL-Parameter:
+      show=v,i,p,mode,set,graph,dmm,energy,events   (Auswahl der Elemente)
+      layout=card | bar                            (Kachel oder Leiste)
+      scale=1.0                                    (Größe)
+      bg=0.72                                      (Hintergrund-Deckkraft 0..1)
+      graph=v,i,p                                  (Kurven im Mini-Graph)
+      accent=v                                     (welcher Wert am größten ist: v|i|p)
+  */
+  :root {
+    --scale: 1;
+    --bg: rgba(12, 14, 18, 0.72);
+    --fg: #f5f7fa;
+    --muted: #9aa3ad;
+    --v: #ffd60a;
+    --i: #4cc9f0;
+    --p: #ff9f0a;
+    --dmm: #b388ff;
+    --cv: #30d158;
+    --cc: #ff453a;
+    --off: #636366;
+    --mono: "SF Mono", "JetBrains Mono", Menlo, Consolas, ui-monospace, monospace;
+    --sans: -apple-system, "SF Pro Display", "Helvetica Neue", Arial, sans-serif;
+  }
+  html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }
+  body { font-family: var(--sans); color: var(--fg); -webkit-font-smoothing: antialiased; }
+  #root { transform: scale(var(--scale)); transform-origin: top left; display: inline-block; padding: 8px; }
+
+  .panel {
+    background: var(--bg);
+    border-radius: 18px;
+    padding: 14px 18px 12px;
+    border: 2px solid rgba(255,255,255,0.08);
+    box-shadow: 0 8px 30px rgba(0,0,0,0.35);
+    backdrop-filter: blur(6px);
+    transition: border-color 120ms, box-shadow 120ms;
+    min-width: 320px;
+  }
+  .panel.alarm { border-color: var(--cc); box-shadow: 0 0 0 3px rgba(255,69,58,0.35), 0 8px 30px rgba(0,0,0,0.35); }
+  .panel.stale { opacity: 0.55; }
+
+  .head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 13px; color: var(--muted); letter-spacing: 0.06em; text-transform: uppercase; }
+  .head .title { font-weight: 600; }
+  .pill { font-family: var(--mono); font-weight: 800; font-size: 14px; padding: 2px 10px; border-radius: 999px; color: #000; background: var(--off); letter-spacing: 0.04em; }
+  .pill.CV { background: var(--cv); }
+  .pill.CC { background: var(--cc); color: #fff; }
+  .pill.OFF { background: var(--off); color: #fff; }
+  .flag { font-family: var(--mono); font-weight: 800; font-size: 13px; padding: 2px 8px; border-radius: 6px; background: var(--cc); color: #fff; display: none; animation: blink 0.5s steps(2) infinite; }
+  .flag.off { background: var(--off); animation: none; }
+  .banner { margin: 2px 0 6px; padding: 4px 10px; border-radius: 8px; background: var(--cc); color: #fff; font-family: var(--mono); font-weight: 800; font-size: 14px; display: none; }
+  @keyframes blink { 50% { opacity: 0.35; } }
+  .spacer { flex: 1; }
+  .set { font-family: var(--mono); font-size: 13px; color: var(--muted); text-transform: none; }
+
+  .readouts { display: grid; grid-template-columns: auto auto; column-gap: 10px; align-items: baseline; }
+  .val { font-family: var(--mono); font-variant-numeric: tabular-nums; font-weight: 700; text-align: right; line-height: 1.05; }
+  .unit { font-family: var(--sans); font-weight: 600; color: var(--muted); }
+  .big .val { font-size: 56px; } .big .unit { font-size: 26px; }
+  .mid .val { font-size: 40px; } .mid .unit { font-size: 20px; }
+  .row-v .val { color: var(--v); } .row-i .val { color: var(--i); } .row-p .val { color: var(--p); }
+  .row { display: contents; }
+
+  .dmm { margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.1); display: flex; align-items: baseline; gap: 10px; }
+  .dmm .lbl { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; width: 86px; }
+  .dmm .val { color: var(--dmm); font-size: 38px; }
+  .dmm .tag { font-size: 14px; color: var(--muted); font-weight: 600; }
+
+  .foot { display: flex; gap: 14px; margin-top: 6px; font-family: var(--mono); font-size: 13px; color: var(--muted); }
+  .foot b { color: var(--fg); font-weight: 600; }
+  canvas { display: block; margin-top: 8px; width: 100%; height: 70px; }
+  .events { margin-top: 4px; font-size: 12px; color: var(--cc); font-family: var(--mono); min-height: 15px; }
+
+  /* bar layout: everything in one line, for the bottom of the screen */
+  body.bar .panel { display: flex; align-items: center; gap: 22px; padding: 10px 20px; border-radius: 14px; }
+  body.bar .readouts { display: flex; gap: 22px; }
+  body.bar .row { display: flex; align-items: baseline; gap: 6px; }
+  body.bar .big .val, body.bar .mid .val { font-size: 40px; }
+  body.bar .big .unit, body.bar .mid .unit { font-size: 20px; }
+  body.bar .head { margin: 0; flex-direction: column; align-items: flex-start; }
+  body.bar .dmm { margin: 0; padding: 0 0 0 20px; border-top: none; border-left: 1px solid rgba(255,255,255,0.1); }
+  body.bar canvas { width: 220px; height: 48px; margin: 0; }
+  body.bar .foot, body.bar .events { display: none; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<div id="root">
+  <div class="panel" id="panel">
+    <div class="head" id="head">
+      <span class="title">Netzteil</span>
+      <span class="pill" id="mode">--</span>
+      <span class="flag" id="short">KURZSCHLUSS</span>
+      <span class="flag" id="dip">EINBRUCH</span>
+      <span class="flag off" id="outoff">AUSGANG AUS</span>
+      <span class="spacer"></span>
+      <span class="set" id="set"></span>
+    </div>
+    <div class="banner" id="prot"></div>
+    <div class="readouts" id="readouts">
+      <div class="row row-v" id="row-v"><span class="val" id="v">--.---</span><span class="unit">V</span></div>
+      <div class="row row-i" id="row-i"><span class="val" id="i">-.----</span><span class="unit">A</span></div>
+      <div class="row row-p" id="row-p"><span class="val" id="p">--.--</span><span class="unit">W</span></div>
+    </div>
+    <canvas id="graph" width="640" height="140"></canvas>
+    <div class="foot" id="energy"><span>E <b id="wh">0</b></span><span>Q <b id="mah">0</b></span><span>I<sub>max</sub> <b id="peak">-</b></span></div>
+    <div class="events" id="events"></div>
+    <div class="dmm" id="dmm">
+      <span class="lbl" id="dmmfn">DMM</span>
+      <span class="val" id="dmmval">-----</span>
+      <span class="tag" id="dmmtag"></span>
+    </div>
+  </div>
+</div>
+<script>
+(() => {
+  const q = new URLSearchParams(location.search);
+  const show = new Set((q.get('show') || 'v,i,p,mode,set,graph,dmm').split(',').map(s => s.trim()));
+  const graphSeries = new Set((q.get('graph') || 'v,i').split(','));
+  const accent = q.get('accent') || 'v';
+  const layout = q.get('layout') || 'card';
+  document.documentElement.style.setProperty('--scale', q.get('scale') || '1');
+  const bgA = parseFloat(q.get('bg') ?? '0.72');
+  document.documentElement.style.setProperty('--bg', `rgba(12,14,18,${isNaN(bgA) ? 0.72 : bgA})`);
+  if (layout === 'bar') document.body.classList.add('bar');
+
+  const $ = id => document.getElementById(id);
+  const toggle = (id, on) => $(id).classList.toggle('hidden', !on);
+  toggle('row-v', show.has('v')); toggle('row-i', show.has('i')); toggle('row-p', show.has('p'));
+  toggle('mode', show.has('mode')); toggle('set', show.has('set'));
+  toggle('graph', show.has('graph')); toggle('dmm', show.has('dmm'));
+  toggle('energy', show.has('energy')); toggle('events', show.has('events'));
+  const powerVisible = ['v', 'i', 'p', 'mode', 'graph'].some(k => show.has(k));
+  toggle('head', powerVisible); toggle('readouts', powerVisible);
+  for (const k of ['v', 'i', 'p']) $('row-' + k).classList.add(k === accent ? 'big' : 'mid');
+
+  const css = getComputedStyle(document.documentElement);
+  const colors = { v: css.getPropertyValue('--v').trim(), i: css.getPropertyValue('--i').trim(), p: css.getPropertyValue('--p').trim() };
+
+  let spark = [];
+  let last = null;
+
+  function render(d) {
+    last = d;
+    $('panel').classList.toggle('stale', !d.power_connected && !d.dmm_connected);
+    $('panel').classList.toggle('alarm', d.short || d.dropout || !!d.protection);
+    $('v').textContent = d.v_text;
+    $('i').textContent = d.i_text;
+    $('p').textContent = d.p_text;
+    const m = $('mode'); m.textContent = d.mode; m.className = 'pill ' + d.mode + (show.has('mode') ? '' : ' hidden');
+    $('short').style.display = d.short ? 'inline-block' : 'none';
+    $('dip').style.display = d.dropout && !d.short ? 'inline-block' : 'none';
+    $('outoff').style.display = d.output_on === false && !d.protection ? 'inline-block' : 'none';
+    $('prot').textContent = d.protection ? 'SCHUTZABSCHALTUNG · ' + d.protection : '';
+    $('prot').style.display = d.protection && powerVisible ? 'block' : 'none';
+    const parts = [];
+    // "Soll" from the supply itself, "≈ Soll" when only learned
+    if (d.v_set_text) parts.push((d.set_learned ? '≈ Soll ' : 'Soll ') + d.v_set_text + ' V');
+    if (d.i_set_text) parts.push((d.i_set_learned ? '≈ Limit ' : 'Limit ') + d.i_set_text + ' A');
+    $('set').textContent = parts.join(' · ');
+    $('wh').textContent = d.energy_text;
+    $('mah').textContent = d.charge_text;
+    $('peak').textContent = d.peak_i_text || '-';
+    $('events').textContent = d.dropouts ? `${d.dropouts}× Einbruch · ${d.last_event || ''}` : (d.last_event || '');
+    $('dmmfn').textContent = 'Multimeter';
+    $('dmmval').textContent = d.dmm_text;
+    $('dmmtag').textContent = d.dmm_function;
+    if (!d.dmm_connected && show.has('dmm') && powerVisible) $('dmm').classList.add('hidden');
+    else if (show.has('dmm')) $('dmm').classList.remove('hidden');
+    if (d.spark) { spark = d.spark; draw(); }
+  }
+
+  function draw() {
+    const c = $('graph');
+    if (c.classList.contains('hidden')) return;
+    const dpr = window.devicePixelRatio || 1;
+    const w = c.clientWidth * dpr, h = c.clientHeight * dpr;
+    if (c.width !== w || c.height !== h) { c.width = w; c.height = h; }
+    const g = c.getContext('2d');
+    g.clearRect(0, 0, w, h);
+    if (spark.length < 2) return;
+    const t0 = -20, pad = 3 * dpr;
+    g.strokeStyle = 'rgba(255,255,255,0.08)'; g.lineWidth = 1;
+    for (let k = 1; k < 4; k++) { const y = (h * k) / 4; g.beginPath(); g.moveTo(0, y); g.lineTo(w, y); g.stroke(); }
+    const series = [['v', 1, last && last.v_set], ['i', 2, last && last.i_set], ['p', 3, null]];
+    for (const [key, col, setp] of series) {
+      if (!graphSeries.has(key)) continue;
+      let max = setp || 0;
+      for (const r of spark) max = Math.max(max, r[col]);
+      max = max > 0 ? max * 1.1 : 1;
+      g.strokeStyle = colors[key]; g.lineWidth = 2 * dpr; g.lineJoin = 'round';
+      g.beginPath();
+      spark.forEach((r, k) => {
+        const x = ((r[0] - t0) / -t0) * w;
+        const y = h - pad - (r[col] / max) * (h - 2 * pad);
+        k ? g.lineTo(x, y) : g.moveTo(x, y);
+      });
+      g.stroke();
+    }
+  }
+
+  function connect() {
+    const es = new EventSource('/events');
+    es.onmessage = ev => { try { render(JSON.parse(ev.data)); } catch (e) {} };
+    es.onerror = () => { $('panel').classList.add('stale'); es.close(); setTimeout(connect, 1000); };
+  }
+  connect();
+  window.addEventListener('resize', draw);
+})();
+</script>
+</body>
+</html>
