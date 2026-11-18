@@ -1,0 +1,33 @@
+name: Windows
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Tests
+        run: cargo test
+      - name: Build PowerMeter.exe
+        run: cargo build --release
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist/PowerMeter | Out-Null
+          Copy-Item target/release/powermeter.exe dist/PowerMeter/PowerMeter.exe
+          Compress-Archive -Path dist/PowerMeter -DestinationPath dist/PowerMeter-Windows.zip -Force
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PowerMeter-Windows
+          path: dist/PowerMeter-Windows.zip
