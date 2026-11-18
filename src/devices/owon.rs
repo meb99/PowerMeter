@@ -1,9 +1,14 @@
 //! OWON XDM1041 / XDM1241 / XDM2041 bench multimeter over USB serial (SCPI).
 //!
-//! The meter answers `MEAS1?` with the value on the main display in plain
+//! The meter answers `MEAS?` with the value on the main display in plain
 //! scientific notation (`8.924057E-01`). We poll as fast as the meter answers,
 //! which with `RATE F` is the meter's own update rate, and check `FUNC?` once
-//! a second so turning the knob / pressing a key on the meter is picked up.
+//! a second so pressing a key on the meter is picked up.
+//!
+//! We don't send `SYST:REM`: it locks the meter's keys, and the user should
+//! still be able to switch the function on the meter while filming.
+//! XDM1041/XDM1241 firmware before V4.3.0 swaps DIOD and CONT in the `FUNC?`
+//! reply (setting them with `CONF:` works); [`swaps_diod_cont`] undoes that.
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -85,7 +90,7 @@ fn session(
     link.drain();
 
     let idn = link.query("*IDN?").map_err(|e| e.to_string())?;
-    link.send("SYST:REM").map_err(|e| e.to_string())?;
+    let swap_diod_cont = swaps_diod_cont(&idn);
     link.send(cfg.rate.scpi()).map_err(|e| e.to_string())?;
     link.drain();
 
@@ -119,10 +124,15 @@ fn session(
             if last_func_check.elapsed() >= Duration::from_secs(1) {
                 last_func_check = Instant::now();
                 let f = DmmFunction::from_scpi(&link.query("FUNC?").map_err(|e| e.to_string())?);
+                let f = match f {
+                    DmmFunction::Cont if swap_diod_cont => DmmFunction::Diode,
+                    DmmFunction::Diode if swap_diod_cont => DmmFunction::Cont,
+                    f => f,
+                };
                 store.lock().unwrap().set_dmm_function(f);
             }
 
-            let answer = link.query("MEAS1?").map_err(|e| e.to_string())?;
+            let answer = link.query("MEAS?").map_err(|e| e.to_string())?;
             if let Some(v) = parse_reading(&answer) {
                 store.lock().unwrap().push_dmm(v);
                 ctx.request_repaint();
@@ -133,6 +143,23 @@ fn session(
 
     let _ = link.send("SYST:LOC");
     result
+}
+
+/// XDM1041/XDM1241 firmware older than V4.3.0 reports CONT as DIOD and
+/// DIOD as CONT in `FUNC?` (IDN: `OWON,XDM1241,<serial>,V4.2.0,3`).
+pub fn swaps_diod_cont(idn: &str) -> bool {
+    let parts: Vec<&str> = idn.trim().split(',').map(str::trim).collect();
+    if parts.len() < 4
+        || !parts[0].eq_ignore_ascii_case("OWON")
+        || !(parts[1].eq_ignore_ascii_case("XDM1041") || parts[1].eq_ignore_ascii_case("XDM1241"))
+    {
+        return false;
+    }
+    let mut v = parts[3].trim_start_matches(['V', 'v']).split('.');
+    match (v.next().and_then(|x| x.parse::<u32>().ok()), v.next().and_then(|x| x.parse::<u32>().ok())) {
+        (Some(major), Some(minor)) => major < 4 || (major == 4 && minor < 3),
+        _ => false,
+    }
 }
 
 /// Parses a reading. Overload is reported as a huge number (≥ 1E9) or as
@@ -161,5 +188,16 @@ mod tests {
         assert!(parse_reading("OL").unwrap().is_nan());
         assert_eq!(parse_reading(""), None);
         assert_eq!(parse_reading("garbage"), None);
+        assert!(parse_reading("-9.9E+37").unwrap().is_nan());
+    }
+
+    #[test]
+    fn old_firmware_swaps_diod_and_cont() {
+        assert!(swaps_diod_cont("OWON,XDM1041,23362355,V4.2.0,3"));
+        assert!(swaps_diod_cont("OWON,XDM1241,1234,V3.9.1,2\r"));
+        assert!(!swaps_diod_cont("OWON,XDM1241,1234,V4.3.0,3"));
+        assert!(!swaps_diod_cont("OWON,XDM1241,1234,V5.0.0,3"));
+        assert!(!swaps_diod_cont("OWON,XDM2041,1234,V4.2.0,3"));
+        assert!(!swaps_diod_cont("OWON,XDM1241"));
     }
 }
