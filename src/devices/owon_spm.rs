@@ -1,7 +1,8 @@
 //! OWON SPM3051 / SPM6053 / SPM3103 / SPM6103: programmable bench supply
 //! with a built-in 4½-digit multimeter, SCPI over a USB serial port (CH340).
-//! The SPE models (same supply, no multimeter) and the "multicomp pro
-//! MP7111…" rebadges work too.
+//! The SPE models (same supply, no multimeter), the "multicomp pro
+//! MP7111…" rebadges and the Kiprim DC…S supplies (same SCPI dialect) work
+//! too.
 //!
 //! One thread talks to the supply. Each cycle (10 Hz) it first sends what
 //! the UI asked for, then reads `MEAS:ALL:INFO?` (voltage, current, power,
@@ -24,7 +25,7 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 
 use super::{DmmCommand, PsuCommand, ScpiLink, ScpiPort, stopped};
-use crate::model::{ConnState, DmmFunction, PowerSample, PsuMode, PsuState, Shared};
+use crate::model::{ConnState, DmmFunction, PowerSample, PsuMode, PsuState, Resolution, Shared};
 
 /// Wait per query attempt; the SPM answers in 10–20 ms.
 const QUERY_TIMEOUT: Duration = Duration::from_millis(300);
@@ -88,8 +89,21 @@ impl SpmIdn {
     /// Voltage and current limits of the model, `None` if unknown.
     pub fn limits(&self) -> Option<(f64, f64)> {
         let m = self.model.to_ascii_uppercase();
-        let digits = m.strip_prefix("SPM").or_else(|| m.strip_prefix("SPE"))?;
-        [("3051", 30.0, 5.0), ("6053", 60.0, 5.0), ("3103", 30.0, 10.0), ("6103", 60.0, 10.0)]
+        if let Some(digits) = m.strip_prefix("SPM").or_else(|| m.strip_prefix("SPE")) {
+            return [
+                ("3051", 30.0, 5.0),
+                ("6053", 60.0, 5.0),
+                ("3102", 30.0, 10.0),
+                ("3103", 30.0, 10.0),
+                ("6103", 60.0, 10.0),
+            ]
+            .into_iter()
+            .find(|(k, ..)| digits.starts_with(k))
+            .map(|(_, v, i)| (v, i));
+        }
+        // Kiprim DC310S, DC605S, DC610S, DC620S
+        let digits = m.strip_prefix("DC")?;
+        [("310", 30.0, 10.0), ("605", 60.0, 5.0), ("610", 60.0, 10.0), ("620", 60.0, 20.0)]
             .into_iter()
             .find(|(k, ..)| digits.starts_with(k))
             .map(|(_, v, i)| (v, i))
@@ -107,6 +121,7 @@ pub fn parse_idn(s: &str) -> Result<SpmIdn, String> {
         ("owon", Some("SPM")) => true,
         ("owon", Some("SPE")) => false,
         ("multicomp pro", _) if m.starts_with("MP7111") => true,
+        ("kiprim", _) if m.starts_with("DC") => false,
         _ => return Err(format!("Kein OWON SPM/SPE: {raw}")),
     };
     Ok(SpmIdn { raw, vendor, model, has_dmm })
@@ -281,7 +296,32 @@ fn is_timeout(e: &io::Error) -> bool {
 }
 
 pub fn open_serial(port: &str, baud: u32) -> Result<Box<dyn serialport::SerialPort>, String> {
-    serialport::new(port, baud).timeout(Duration::from_millis(10)).open().map_err(|e| format!("{port}: {e}"))
+    serialport::new(port, baud).timeout(Duration::from_millis(10)).open().map_err(|e| port_error(port, &e))
+}
+
+/// What went wrong opening a port, in words a user can act on.
+fn port_error(port: &str, e: &serialport::Error) -> String {
+    let short = port.trim_start_matches("/dev/");
+    let text = e.to_string();
+    let lower = text.to_ascii_lowercase();
+    let busy = lower.contains("access is denied")
+        || lower.contains("zugriff verweigert")
+        || lower.contains("busy")
+        || e.kind() == serialport::ErrorKind::Io(io::ErrorKind::PermissionDenied);
+    let missing = lower.contains("not find")
+        || lower.contains("no such file")
+        || lower.contains("nicht gefunden")
+        || e.kind() == serialport::ErrorKind::Io(io::ErrorKind::NotFound);
+    if busy {
+        format!(
+            "{short} ist belegt – ein anderes Programm (z. B. die OWON-PC-Software oder PowerMeter selbst) \
+             benutzt den Port. Das erst schließen. ({text})"
+        )
+    } else if missing {
+        format!("{short} gibt es nicht (mehr) – USB-Kabel eingesteckt, Netzteil an? ({text})")
+    } else {
+        format!("{short}: {text}")
+    }
 }
 
 /// Opens the port and identifies the supply. If `*IDN?` gets no (usable)
@@ -716,6 +756,7 @@ impl<'a, P: ScpiPort> Session<'a, P> {
         if self.cfg.push_samples {
             // Time stamp in the middle of the query; the SPM calibrates
             // itself, the box calibration doesn't apply.
+            s.power.resolution = Resolution::SPM;
             s.push_power_sample_uncalibrated(PowerSample { t: (t0 + t1) / 2.0, v, i });
         }
         drop(s);
@@ -838,6 +879,40 @@ impl<'a, P: ScpiPort> Session<'a, P> {
 
 // ------------------------------------------------------------------- probe
 
+/// The probe on a port name: `auto` takes the first USB-serial adapter,
+/// `sim` the simulated SPM, anything else is opened as is (`COM3`,
+/// `/dev/cu.usbserial-1410`).
+pub fn probe_port(port: &str, baud: u32, out: &mut dyn io::Write) -> Result<(), String> {
+    let port = if port.eq_ignore_ascii_case("auto") {
+        let ports = super::list_ports();
+        match super::auto_port(&ports) {
+            Some(p) => {
+                let _ = writeln!(out, "Automatisch gewählt: {}", p.label());
+                p.name.clone()
+            }
+            None if ports.is_empty() => {
+                return Err("Kein serieller Port gefunden. USB-Kabel eingesteckt und Netzteil eingeschaltet?".into());
+            }
+            None => {
+                let names: Vec<String> = ports.iter().map(|p| p.label()).collect();
+                return Err(format!(
+                    "Kein USB-Seriell-Adapter erkannt. Gefunden: {}. Den Port bitte selbst wählen.",
+                    names.join(", ")
+                ));
+            }
+        }
+    } else {
+        port.to_string()
+    };
+    let _ = writeln!(out, "OWON SPM/SPE an {port}, {baud} Baud (nur lesen)\n");
+    if port == "sim" {
+        let dev = super::sim::SpmDevice::shared();
+        probe(baud, move |_| Ok(super::sim::FakeSpm::new(dev.clone())), out)
+    } else {
+        probe(baud, |b| open_serial(&port, b), out)
+    }
+}
+
 /// `powermeter --probe-spm <port> [baud]`: reads everything once and
 /// measures how often the supply really refreshes its readings. Read-only:
 /// sends queries only, never a set command, `SYST:REM` or `*RST`.
@@ -931,6 +1006,17 @@ mod tests {
         assert_eq!(idn.limits(), None);
         assert_eq!(parse_idn("OWON,SPM6103,1,FV").unwrap().limits(), Some((60.0, 10.0)));
         assert_eq!(parse_idn("owon,spm3103,1,FV").unwrap().limits(), Some((30.0, 10.0)));
+        let spe = parse_idn("OWON,SPE3103,2350123,FV:V1.2.1").unwrap();
+        assert!(!spe.has_dmm);
+        assert_eq!(spe.limits(), Some((30.0, 10.0)));
+        assert_eq!(parse_idn("OWON,SPE3102,1,FV").unwrap().limits(), Some((30.0, 10.0)));
+        for (model, limits) in
+            [("DC310S", (30.0, 10.0)), ("DC605S", (60.0, 5.0)), ("DC610S", (60.0, 10.0)), ("DC620S", (60.0, 20.0))]
+        {
+            let k = parse_idn(&format!("KIPRIM,{model},123,V1.0")).unwrap();
+            assert!(!k.has_dmm, "{model}");
+            assert_eq!(k.limits(), Some(limits), "{model}");
+        }
         let spe = parse_idn("OWON,SPE6053,1,FV:V1.0").unwrap();
         assert!(!spe.has_dmm);
         assert_eq!(spe.limits(), Some((60.0, 5.0)));
@@ -950,6 +1036,12 @@ mod tests {
         assert_eq!(a.mode, PsuMode::Fault);
         assert_eq!(parse_all_info("12.000,1.000,12.000,OFF,OFF,OFF,2").unwrap().mode, PsuMode::Cc);
         assert_eq!(parse_all_info("0,0,0,OFF,OFF,OFF,0").unwrap().mode, PsuMode::Standby);
+        // space separated, as in the programming manual
+        let a = parse_all_info("2.000 5.000 10.000 0 0 0 1").unwrap();
+        assert_eq!((a.v, a.i, a.p, a.mode), (2.0, 5.0, 10.0, PsuMode::Cv));
+        assert!(!a.trip_ovp && !a.trip_ocp && !a.trip_otp);
+        let a = parse_all_info("  1.234  0.118 0.146 OFF ON OFF 2 \r\n").unwrap();
+        assert_eq!((a.i, a.trip_ocp, a.mode), (0.118, true, PsuMode::Cc));
         assert_eq!(parse_all_info("ERR"), None);
         assert_eq!(parse_all_info("5.010,0.000"), None);
         assert_eq!(parse_all_info("5.010,0.000,0.000,OFF,OFF,OFF,1,9"), None);

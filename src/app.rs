@@ -1,15 +1,16 @@
 //! The main window: connection bar, big readouts, live graphs, event list.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, RichText, Vec2b};
 use egui_plot::{GridMark, Line, Plot, PlotPoints, Span, VLine};
 use serde::{Deserialize, Serialize};
 
+use crate::designs::{DesignStore, SharedDesigns};
 use crate::devices::owon_spm::protection_limit as ovp_limit;
-use crate::devices::{self, DeviceHandle, DmmCommand, DmmKind, DmmRate, PowerSourceKind, PsuCommand};
+use crate::devices::{self, DeviceHandle, DmmCommand, DmmKind, DmmRate, PortInfo, PowerSourceKind, PsuCommand};
 use crate::format;
 use crate::model::{
     AnalysisSettings, Calibration, ConnState, DmmFunction, EventKind, PowerSample, PsuMode, PsuState, RegMode, Shared,
@@ -17,12 +18,20 @@ use crate::model::{
 };
 use crate::overlay::OverlayServer;
 
-const COL_V: Color32 = Color32::from_rgb(0xff, 0xd6, 0x0a);
-const COL_I: Color32 = Color32::from_rgb(0x4c, 0xc9, 0xf0);
-const COL_P: Color32 = Color32::from_rgb(0xff, 0x9f, 0x0a);
+// Same colors as the default overlay design ("Messgerät").
+const COL_V: Color32 = Color32::from_rgb(0x00, 0xe5, 0xff);
+const COL_I: Color32 = Color32::from_rgb(0xff, 0xb0, 0x00);
+const COL_P: Color32 = Color32::from_rgb(0x3d, 0xdc, 0x84);
 const COL_DMM: Color32 = Color32::from_rgb(0xb3, 0x88, 0xff);
 const COL_CV: Color32 = Color32::from_rgb(0x30, 0xd1, 0x58);
+/// Warnings: short, dropout, errors.
 const COL_CC: Color32 = Color32::from_rgb(0xff, 0x45, 0x3a);
+/// The CC badge (current limit is no error).
+const COL_CC_MODE: Color32 = Color32::from_rgb(0xff, 0x9f, 0x0a);
+/// Pending edits, notes and "busy" hints.
+const COL_NOTE: Color32 = Color32::from_rgb(0xff, 0x9f, 0x0a);
+/// Font of the big readouts (B612 Mono Bold, bundled).
+const READOUT_FONT: &str = "b612";
 const COL_MUTED: Color32 = Color32::from_rgb(0x8e, 0x8e, 0x93);
 const COL_PROT: Color32 = Color32::from_rgb(0xbf, 0x5a, 0xf2);
 
@@ -65,6 +74,9 @@ pub struct Settings {
     pub spm_lock_panel: bool,
     /// The app never sets more than this voltage on a controllable supply.
     pub psu_v_guard: Option<f64>,
+    /// One-click set points for the SPM/SPE panel (voltage and current
+    /// only, never the output).
+    pub psu_presets: Vec<Preset>,
     /// Significant digits on the multimeter readout (XDM1241: 55 000 counts).
     pub dmm_digits: usize,
     pub analysis: AnalysisSettings,
@@ -87,7 +99,7 @@ impl Default for Settings {
             power_kind: PowerSourceKind::Simulator,
             power_port: String::new(),
             power_baud: 115_200,
-            dmm_kind: DmmKind::Simulator,
+            dmm_kind: DmmKind::NoMeter,
             dmm_port: String::new(),
             dmm_baud: 115_200,
             dmm_rate: DmmRate::Fast,
@@ -97,6 +109,7 @@ impl Default for Settings {
             spm_box_port: String::new(),
             spm_lock_panel: false,
             psu_v_guard: None,
+            psu_presets: vec![Preset { v: 3.3, i: 1.0 }, Preset { v: 5.0, i: 2.0 }, Preset { v: 12.0, i: 1.0 }],
             dmm_digits: 5,
             analysis: AnalysisSettings::default(),
             calibration: Calibration::default(),
@@ -114,8 +127,52 @@ impl Default for Settings {
     }
 }
 
+/// A set point pair for one click.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Preset {
+    pub v: f64,
+    pub i: f64,
+}
+
+impl Preset {
+    /// "3,3 V · 1 A"
+    pub fn label(&self) -> String {
+        let num = |x: f64| {
+            let s = format!("{:.3}", x);
+            let s = s.trim_end_matches('0').trim_end_matches('.');
+            s.replace('.', ",")
+        };
+        format!("{} V · {} A", num(self.v), num(self.i))
+    }
+}
+
+/// "Verbindung prüfen": the read-only probe, running in the background.
+struct ProbeRun {
+    output: Arc<Mutex<String>>,
+    done: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// Collects the probe output for the window and asks for a repaint.
+struct ProbeWriter {
+    out: Arc<Mutex<String>>,
+    ctx: egui::Context,
+}
+
+impl std::io::Write for ProbeWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.out.lock().unwrap().push_str(&String::from_utf8_lossy(buf));
+        self.ctx.request_repaint();
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 pub struct PowerMeterApp {
     store: Shared,
+    designs: SharedDesigns,
     settings: Settings,
     power_dev: Option<DeviceHandle>,
     /// PowerMon box delivering the samples in the hybrid SPM setup.
@@ -133,8 +190,16 @@ pub struct PowerMeterApp {
     /// Last output command from a click or key O, and when.
     output_cmd: Option<(bool, Instant)>,
     overlay: Option<OverlayServer>,
-    ports: Vec<String>,
+    ports: Vec<PortInfo>,
     last_port_scan: Instant,
+    /// Which source produced the power / multimeter data on screen; a
+    /// different one clears it, so simulated and real readings never mix.
+    power_source: Option<String>,
+    dmm_source: Option<String>,
+    probe: Option<ProbeRun>,
+    /// A preset that would raise the voltage on a live output, waiting for
+    /// the user's OK.
+    preset_confirm: Option<Preset>,
     /// `Some` while the graphs are frozen for inspection.
     paused: bool,
     view_x: (f64, f64),
@@ -146,7 +211,11 @@ impl PowerMeterApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let settings: Settings = cc.storage.and_then(|s| eframe::get_value(s, "settings")).unwrap_or_default();
         cc.egui_ctx.set_visuals(egui::Visuals::dark());
+        install_fonts(&cc.egui_ctx);
         let store = Store::shared();
+        let designs = DesignStore::open_default();
+        let note = designs.note.clone();
+        let designs = Arc::new(Mutex::new(designs));
         store.lock().unwrap().analysis = settings.analysis.clone();
         store.lock().unwrap().analysis.display_avg_ms = settings.display_avg_ms;
         store.lock().unwrap().calibration = settings.calibration;
@@ -155,6 +224,7 @@ impl PowerMeterApp {
         }
         let mut app = Self {
             store,
+            designs,
             settings,
             power_dev: None,
             box_dev: None,
@@ -167,23 +237,44 @@ impl PowerMeterApp {
             overlay: None,
             ports: devices::list_ports(),
             last_port_scan: Instant::now(),
+            power_source: None,
+            dmm_source: None,
+            probe: None,
+            preset_confirm: None,
             paused: false,
             view_x: (0.0, 30.0),
             toast: None,
             show_settings: false,
         };
         app.restart_overlay();
+        if let Some(n) = note {
+            app.toast(n);
+        }
         // Connecting only reads: no set command goes to a supply here.
         if app.settings.auto_connect {
             app.spm_dmm = app.settings.dmm_kind == DmmKind::OwonSpm;
             if app.power_port_chosen() {
                 app.connect_power(&cc.egui_ctx);
             }
-            if app.settings.dmm_kind != DmmKind::OwonXdm || !app.settings.dmm_port.is_empty() {
+            let dmm_ready = match app.settings.dmm_kind {
+                DmmKind::NoMeter => false,
+                DmmKind::OwonXdm => !app.settings.dmm_port.is_empty(),
+                DmmKind::OwonSpm | DmmKind::Simulator => true,
+            };
+            if dmm_ready {
                 app.connect_dmm(&cc.egui_ctx);
             }
         }
         app
+    }
+
+    /// What delivers the power samples, as text: another one means other data.
+    fn power_source_id(&self) -> String {
+        power_source_id(&self.settings)
+    }
+
+    fn dmm_source_id(&self) -> String {
+        dmm_source_id(&self.settings)
     }
 
     fn power_port_chosen(&self) -> bool {
@@ -227,8 +318,17 @@ impl PowerMeterApp {
         sent
     }
 
+    /// Port the overlay server really listens on.
+    fn overlay_port(&self) -> u16 {
+        self.overlay.as_ref().and_then(|o| o.port).unwrap_or(self.settings.overlay_port)
+    }
+
     fn overlay_url(&self) -> String {
-        format!("http://127.0.0.1:{}/overlay", self.settings.overlay_port)
+        format!("http://127.0.0.1:{}/overlay", self.overlay_port())
+    }
+
+    fn studio_url(&self) -> String {
+        format!("http://127.0.0.1:{}/studio", self.overlay_port())
     }
 
     fn restart_overlay(&mut self) {
@@ -236,7 +336,8 @@ impl PowerMeterApp {
         let ip =
             if self.settings.overlay_lan { IpAddr::V4(Ipv4Addr::UNSPECIFIED) } else { IpAddr::V4(Ipv4Addr::LOCALHOST) };
         let addr = SocketAddr::new(ip, self.settings.overlay_port);
-        self.overlay = Some(OverlayServer::start(self.store.clone(), addr, self.settings.dmm_digits));
+        self.overlay =
+            Some(OverlayServer::start(self.store.clone(), self.designs.clone(), addr, self.settings.dmm_digits));
     }
 
     fn disconnect_power(&mut self) {
@@ -250,6 +351,13 @@ impl PowerMeterApp {
 
     fn connect_power(&mut self, ctx: &egui::Context) {
         self.disconnect_power();
+        // Another device (or the simulator) than before: start from a clean
+        // slate. The same one again (e.g. after a USB hiccup) keeps its data.
+        let source = self.power_source_id();
+        if self.power_source.as_ref() != Some(&source) {
+            self.store.lock().unwrap().clear_power_source();
+            self.power_source = Some(source);
+        }
         let kind = self.settings.power_kind;
         let store = self.store.clone();
         let ctx2 = ctx.clone();
@@ -297,7 +405,83 @@ impl PowerMeterApp {
         };
         self.power_dev = Some(handle);
         if self.settings.dmm_kind == DmmKind::OwonSpm && !kind.is_spm() {
-            self.store.lock().unwrap().dmm.conn = ConnState::Error("Netzteil ist kein OWON SPM".into());
+            self.store.lock().unwrap().dmm.conn =
+                ConnState::Error("Netzteil ist kein OWON SPM (das SPE hat kein Multimeter)".into());
+        }
+    }
+
+    /// The read-only probe ("Verbindung prüfen") on the chosen SPM/SPE port,
+    /// or the first USB-serial adapter if none is chosen. Sends queries
+    /// only, never a set command. The port is exclusive, so only while the
+    /// app itself is not connected to it.
+    fn start_probe(&mut self, ctx: &egui::Context) {
+        if self.probe.as_ref().is_some_and(|p| !p.done.load(std::sync::atomic::Ordering::Relaxed)) {
+            return;
+        }
+        let output = Arc::new(Mutex::new(String::new()));
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let port = if self.settings.power_kind == PowerSourceKind::SpmSimulator {
+            "sim".to_string()
+        } else if self.settings.spm_port.is_empty() {
+            "auto".to_string()
+        } else {
+            self.settings.spm_port.clone()
+        };
+        let baud = self.settings.spm_baud;
+        let mut w = ProbeWriter { out: output.clone(), ctx: ctx.clone() };
+        let d = done.clone();
+        let ctx = ctx.clone();
+        let spawned = std::thread::Builder::new().name("spm-probe".into()).spawn(move || {
+            if let Err(e) = devices::owon_spm::probe_port(&port, baud, &mut w) {
+                use std::io::Write;
+                let _ = writeln!(w, "\n✖ {e}");
+            } else {
+                use std::io::Write;
+                let _ = writeln!(w, "\n✔ Das Netzteil antwortet. Du kannst oben „Verbinden“ klicken.");
+            }
+            d.store(true, std::sync::atomic::Ordering::Relaxed);
+            ctx.request_repaint();
+        });
+        if spawned.is_ok() {
+            self.probe = Some(ProbeRun { output, done });
+        }
+    }
+
+    /// Window with what the probe found, and a copy button.
+    fn probe_window(&mut self, ctx: &egui::Context) {
+        let Some(run) = &self.probe else { return };
+        let text = run.output.lock().unwrap().clone();
+        let done = run.done.load(std::sync::atomic::Ordering::Relaxed);
+        let mut open = true;
+        let mut copy = false;
+        let mut again = false;
+        egui::Window::new("Verbindung prüfen").open(&mut open).default_width(620.0).show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                if done {
+                    ui.label(RichText::new("Fertig – es wurde nur gelesen, nichts verstellt.").color(COL_MUTED));
+                } else {
+                    ui.spinner();
+                    ui.label("Frage das Netzteil ab … (dauert ein paar Sekunden, verstellt nichts)");
+                }
+            });
+            egui::ScrollArea::vertical().max_height(360.0).stick_to_bottom(true).show(ui, |ui| {
+                ui.add(
+                    egui::Label::new(RichText::new(&text).monospace().size(12.0)).wrap_mode(egui::TextWrapMode::Extend),
+                );
+            });
+            ui.horizontal(|ui| {
+                copy = ui.add_enabled(!text.is_empty(), egui::Button::new("📋 Kopieren")).clicked();
+                again = ui.add_enabled(done, egui::Button::new("Nochmal prüfen")).clicked();
+            });
+        });
+        if copy {
+            ctx.copy_text(text);
+            self.toast("Ergebnis kopiert");
+        }
+        if !open {
+            self.probe = None;
+        } else if again {
+            self.start_probe(ctx);
         }
     }
 
@@ -331,11 +515,21 @@ impl PowerMeterApp {
 
     fn connect_dmm(&mut self, ctx: &egui::Context) {
         self.dmm_dev = None;
+        let source = self.dmm_source_id();
+        if self.dmm_source.as_ref() != Some(&source) {
+            self.store.lock().unwrap().clear_dmm();
+            self.dmm_source = Some(source);
+        }
+        if self.settings.dmm_kind == DmmKind::NoMeter {
+            self.disconnect_dmm(ctx);
+            self.store.lock().unwrap().dmm.conn = ConnState::Disconnected;
+            return;
+        }
         if self.settings.dmm_kind == DmmKind::OwonSpm {
             // The built-in meter runs on the supply's connection.
             self.spm_dmm = true;
             let error = if !self.settings.power_kind.is_spm() {
-                Some("Netzteil ist kein OWON SPM")
+                Some("Netzteil ist kein OWON SPM (das SPE hat kein Multimeter)")
             } else if !self.power_running() {
                 Some("Erst das Netzteil verbinden")
             } else {
@@ -357,7 +551,7 @@ impl PowerMeterApp {
             DmmKind::Simulator => {
                 DeviceHandle::spawn("dmm-sim", move |stop| devices::sim::run_dmm(store, ctx, rx, stop))
             }
-            DmmKind::OwonSpm => return, // handled above
+            DmmKind::OwonSpm | DmmKind::NoMeter => return, // handled above
             DmmKind::OwonXdm => {
                 let cfg = devices::owon::OwonConfig {
                     port: self.settings.dmm_port.clone(),
@@ -387,8 +581,7 @@ impl PowerMeterApp {
         match crate::export::export_session(&self.store) {
             Ok(dir) => {
                 self.toast(format!("Gespeichert: {}", dir.display()));
-                #[cfg(target_os = "macos")]
-                let _ = std::process::Command::new("open").arg(&dir).spawn();
+                crate::export::reveal(&dir);
             }
             Err(e) => self.toast(format!("Export fehlgeschlagen: {e}")),
         }
@@ -471,17 +664,23 @@ impl PowerMeterApp {
                 DmmKind::OwonSpm => {
                     ui.label(RichText::new("über Netzteil").color(COL_MUTED));
                 }
-                DmmKind::Simulator => {}
+                DmmKind::Simulator | DmmKind::NoMeter => {}
             }
             let changed = before != self.settings.dmm_kind;
-            if was_running && !changed {
-                if ui.button("Trennen").clicked() {
-                    self.disconnect_dmm(&ctx);
+            if self.settings.dmm_kind == DmmKind::NoMeter {
+                if changed {
+                    self.connect_dmm(&ctx);
                 }
-            } else if ui.button("Verbinden").clicked() || (changed && was_running) {
-                self.connect_dmm(&ctx);
+            } else {
+                if was_running && !changed {
+                    if ui.button("Trennen").clicked() {
+                        self.disconnect_dmm(&ctx);
+                    }
+                } else if ui.button("Verbinden").clicked() || (changed && was_running) {
+                    self.connect_dmm(&ctx);
+                }
+                conn_dot(ui, &conn);
             }
-            conn_dot(ui, &conn);
 
             ui.separator();
             let url = self.overlay_url();
@@ -501,6 +700,13 @@ impl PowerMeterApp {
                         ctx.copy_text(url.clone());
                         self.toast("Overlay-URL kopiert");
                     }
+                    if ui
+                        .button("🎨 Overlay gestalten")
+                        .on_hover_text("Öffnet das Overlay-Studio im Browser: Vorlage wählen, Farben, Schrift, Logo …")
+                        .clicked()
+                    {
+                        ctx.open_url(egui::OpenUrl::new_tab(self.studio_url()));
+                    }
                 }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -512,7 +718,7 @@ impl PowerMeterApp {
     // --------------------------------------------------------------- readouts
 
     fn readouts(&mut self, ui: &mut egui::Ui) {
-        let (disp, mode, v_set, i_set, dmm, dmm_fn, dmm_conn, power_conn, short, dip, prot) = {
+        let (disp, mode, v_set, i_set, dmm, dmm_fn, dmm_conn, power_conn, short, dip, prot, res, output_off) = {
             let s = self.store.lock().unwrap();
             let a = &s.power.analyzer;
             let now = s.now();
@@ -531,12 +737,16 @@ impl PowerMeterApp {
                 a.active(EventKind::Short),
                 a.active(EventKind::Dropout),
                 a.active(EventKind::Protection),
+                s.power.resolution,
+                s.power.psu.as_ref().is_some_and(|p| p.output_on == Some(false)),
             )
         };
+        let dim = |c: Color32| if output_off { c.gamma_multiply(0.45) } else { c };
         let avail = ui.available_width();
         let cols = if dmm_conn { 4.0 } else { 3.0 };
         let w = ((avail - (cols - 1.0) * 8.0) / cols).max(150.0);
-        let size = ((w - 28.0) / 5.4).clamp(24.0, 72.0);
+        // B612 Mono: ~0.6 em per digit, "19.000" fits with room to spare
+        let size = ((w - 28.0) / 4.4).clamp(24.0, 88.0);
 
         ui.horizontal(|ui| {
             let sub_v = v_set.map(|(v, approx)| format!("{approx}Soll {} V", format::fixed(v, 2)));
@@ -553,19 +763,19 @@ impl PowerMeterApp {
             let badge = power_conn.then(|| {
                 let c = match mode {
                     RegMode::Cv => COL_CV,
-                    RegMode::Cc => COL_CC,
+                    RegMode::Cc => COL_CC_MODE,
                     _ => COL_MUTED,
                 };
-                (mode.label(), c)
+                if output_off { ("AUS", COL_MUTED) } else { (mode.label(), c) }
             });
             readout(
                 ui,
                 w,
                 size,
                 "SPANNUNG",
-                disp.map_or("--.---".into(), |p| format::fixed(p.v, 3)),
+                disp.map_or(format::placeholder(res.v, 2), |p| format::fixed(p.v, res.v)),
                 "V",
-                COL_V,
+                dim(COL_V),
                 sub_v,
                 badge.or(alarm),
             );
@@ -574,9 +784,9 @@ impl PowerMeterApp {
                 w,
                 size,
                 "STROM",
-                disp.map_or("-.----".into(), |p| format::fixed(p.i, 4)),
+                disp.map_or(format::placeholder(res.i, 1), |p| format::fixed(p.i, res.i)),
                 "A",
-                COL_I,
+                dim(COL_I),
                 sub_i,
                 alarm.filter(|_| badge.is_some()),
             );
@@ -585,9 +795,9 @@ impl PowerMeterApp {
                 w,
                 size,
                 "LEISTUNG",
-                disp.map_or("--.--".into(), |p| format::fixed(p.p(), if p.p() >= 100.0 { 1 } else { 3 })),
+                disp.map_or(format::placeholder(res.p, 2), |p| format::fixed(p.p(), res.p_for(p.p()))),
                 "W",
-                COL_P,
+                dim(COL_P),
                 None,
                 None,
             );
@@ -767,8 +977,9 @@ impl PowerMeterApp {
                     if let Some(sp) = setpoint {
                         pui.hline(
                             egui_plot::HLine::new(format!("Soll {name}"), sp)
-                                .color(color.gamma_multiply(0.4))
-                                .width(1.0),
+                                .color(color.gamma_multiply(0.75))
+                                .style(egui_plot::LineStyle::dashed_loose())
+                                .width(1.2),
                         );
                     }
                     pui.line(Line::new(name, PlotPoints::new(series.clone())).color(color).width(1.6));
@@ -814,9 +1025,11 @@ impl PowerMeterApp {
             ui.heading("Statistik");
             self.stats(ui);
 
-            ui.separator();
-            ui.heading("Multimeter");
-            self.dmm_controls(ui);
+            if self.settings.dmm_kind != DmmKind::NoMeter {
+                ui.separator();
+                ui.heading("Multimeter");
+                self.dmm_controls(ui);
+            }
 
             ui.separator();
             ui.heading("Ereignisse");
@@ -832,11 +1045,20 @@ impl PowerMeterApp {
     /// Returns true when the analysis settings changed.
     fn manual_setpoints(&mut self, ui: &mut egui::Ui) -> bool {
         let note = if self.settings.power_kind.is_spm() {
-            "OWON SPM nicht verbunden – bis dahin gelten diese Werte."
+            "OWON SPM/SPE nicht verbunden – bis dahin gelten diese Werte."
         } else {
             "Das Netzteil hat keine Schnittstelle – Sollwerte hier eintragen oder automatisch lernen lassen."
         };
         ui.label(RichText::new(note).small().color(COL_MUTED));
+        if self.settings.power_kind.is_spm()
+            && !self.power_running()
+            && ui
+                .button("🔌 Verbindung prüfen")
+                .on_hover_text("Schaut nach, ob das Netzteil antwortet – liest nur, verstellt nichts.")
+                .clicked()
+        {
+            self.start_probe(ui.ctx());
+        }
         let (learned_v, learned_i) = {
             let s = self.store.lock().unwrap();
             (s.power.analyzer.learned_vset, s.power.analyzer.learned_iset)
@@ -916,7 +1138,7 @@ impl PowerMeterApp {
                 }
                 let readback = device.map_or("Gerät: –".to_string(), |d| format!("Gerät: {d:.3}{unit}"));
                 let pending = self.psu_edit[k].is_some_and(|e| device.is_none_or(|d| (e - d).abs() > 0.0005));
-                ui.label(RichText::new(readback).small().color(if pending { COL_P } else { COL_MUTED }));
+                ui.label(RichText::new(readback).small().color(if pending { COL_NOTE } else { COL_MUTED }));
                 ui.end_row();
             }
         });
@@ -937,6 +1159,23 @@ impl PowerMeterApp {
                 }
             }
         });
+        if !self.settings.psu_presets.is_empty() {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("Schnellwahl").small().color(COL_MUTED));
+                for preset in self.settings.psu_presets.clone() {
+                    if ui
+                        .button(preset.label())
+                        .on_hover_text(
+                            "Stellt Spannung und Strombegrenzung sofort ein. Der Ausgang bleibt, wie er ist. \
+                             Ändern unter ⚙ Einstellungen.",
+                        )
+                        .clicked()
+                    {
+                        self.apply_preset(psu, preset, false);
+                    }
+                }
+            });
+        }
         let dirty = self.psu_edit.iter().any(Option::is_some);
         ui.horizontal(|ui| {
             if ui.add_enabled(dirty, egui::Button::new("Übernehmen")).on_hover_text("Oder Enter im Feld").clicked() {
@@ -957,7 +1196,7 @@ impl PowerMeterApp {
                     format::fixed(*x, 3)
                 ))
                 .small()
-                .color(COL_P),
+                .color(COL_NOTE),
             );
         }
 
@@ -992,7 +1231,64 @@ impl PowerMeterApp {
             .color(COL_MUTED),
         );
         if let Some(note) = &psu.note {
-            ui.label(RichText::new(note).small().color(COL_P));
+            ui.label(RichText::new(note).small().color(COL_NOTE));
+        }
+    }
+
+    /// A preset button: voltage and current through the same checks as
+    /// "Übernehmen" (guard, OVP, order), never the output. Raising the
+    /// voltage on a live output asks first.
+    fn apply_preset(&mut self, psu: &PsuState, preset: Preset, confirmed: bool) {
+        let raises = psu.output_on == Some(true) && psu.v_set.is_none_or(|v| preset.v > v + 0.0005);
+        if raises && !confirmed {
+            self.preset_confirm = Some(preset);
+            return;
+        }
+        self.psu_edit = [Some(preset.v), Some(preset.i), None, None];
+        self.apply_psu_edit(psu);
+    }
+
+    fn preset_confirm_window(&mut self, ctx: &egui::Context) {
+        let Some(preset) = self.preset_confirm else { return };
+        let psu = self.store.lock().unwrap().power.psu.clone();
+        let Some(psu) = psu.filter(|_| self.psu_handle().is_some()) else {
+            self.preset_confirm = None;
+            return;
+        };
+        let target = preset.v.min(self.v_ceiling(&psu));
+        let mut answer = None;
+        egui::Window::new("Spannung erhöhen?")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.label(format!(
+                    "Der Ausgang ist an. Die Spannung geht von {} V auf {} V hoch.",
+                    psu.v_set.map_or("?".into(), |v| format::fixed(v, 2)),
+                    format::fixed(target, 2)
+                ));
+                ui.label(RichText::new("Verträgt das angeschlossene Gerät das?").color(COL_MUTED));
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    let yes = egui::Button::new(
+                        RichText::new(format!("Ja, {} V einstellen", format::fixed(target, 2))).color(Color32::BLACK),
+                    )
+                    .fill(COL_CC_MODE);
+                    if ui.add(yes).clicked() {
+                        answer = Some(true);
+                    }
+                    if ui.button("Abbrechen").clicked() {
+                        answer = Some(false);
+                    }
+                });
+            });
+        match answer {
+            Some(true) => {
+                self.preset_confirm = None;
+                self.apply_preset(&psu, preset, true);
+            }
+            Some(false) => self.preset_confirm = None,
+            None => {}
         }
     }
 
@@ -1060,12 +1356,13 @@ impl PowerMeterApp {
     }
 
     fn stats(&mut self, ui: &mut egui::Ui) {
-        let (a, ripple, dmm_stats, dmm_unit, power_rate, dmm_rate) = {
+        let (a, ripple, dmm_stats, dmm_unit, power_rate, dmm_rate, res) = {
             let s = self.store.lock().unwrap();
             let now = s.now();
             let power_rate = s.power.samples.iter().rev().take_while(|p| now - p.t <= 1.0).count();
             let dmm_rate = s.dmm.samples.iter().rev().take_while(|p| now - p.t <= 1.0).count();
-            (s.power.analyzer.clone(), s.ripple(1.0), s.dmm.stats, s.dmm.function.unit(), power_rate, dmm_rate)
+            let res = s.power.resolution;
+            (s.power.analyzer.clone(), s.ripple(1.0), s.dmm.stats, s.dmm.function.unit(), power_rate, dmm_rate, res)
         };
         egui::Grid::new("stats").num_columns(4).striped(true).show(ui, |ui| {
             ui.label("");
@@ -1073,16 +1370,18 @@ impl PowerMeterApp {
             ui.label(RichText::new("Ø").color(COL_MUTED));
             ui.label(RichText::new("Max").color(COL_MUTED));
             ui.end_row();
-            for (name, mm, unit, color) in [("U", a.v, "V", COL_V), ("I", a.i, "A", COL_I), ("P", a.p, "W", COL_P)] {
+            // as many decimals as the source really has (SPE: 2 / 3 / 2)
+            let rows = [("U", a.v, "V", COL_V, res.v), ("I", a.i, "A", COL_I, res.i), ("P", a.p, "W", COL_P, res.p)];
+            for (name, mm, unit, color, dec) in rows {
                 ui.label(RichText::new(name).color(color).strong());
                 if mm.n == 0 {
                     ui.label("–");
                     ui.label("–");
                     ui.label("–");
                 } else {
-                    ui.monospace(format::si(mm.min, unit, 4));
-                    ui.monospace(format::si(mm.avg().unwrap_or(0.0), unit, 4));
-                    ui.monospace(format::si(mm.max, unit, 4));
+                    for x in [mm.min, mm.avg().unwrap_or(0.0), mm.max] {
+                        ui.monospace(format!("{} {unit}", format::fixed(x, dec)));
+                    }
                 }
                 ui.end_row();
             }
@@ -1102,7 +1401,7 @@ impl PowerMeterApp {
             ui.monospace(format::si(a.charge_ah, "Ah", 4));
             ui.end_row();
             ui.label("Welligkeit (1 s)");
-            ui.monospace(ripple.map_or("–".into(), |r| format::si(r, "Vpp", 3)));
+            ui.monospace(ripple.map_or("–".into(), |r| format!("{} Vpp", format::fixed(r, res.v))));
             ui.end_row();
             ui.label("Abtastrate");
             ui.monospace(format!("{power_rate} Hz / DMM {dmm_rate} Hz"));
@@ -1152,7 +1451,7 @@ impl PowerMeterApp {
             for e in events {
                 let color = match e.kind {
                     EventKind::Dropout | EventKind::Short => COL_CC,
-                    EventKind::CurrentLimit => COL_P,
+                    EventKind::CurrentLimit => COL_CC_MODE,
                     EventKind::Protection => COL_PROT,
                     EventKind::Marker => Color32::WHITE,
                 };
@@ -1188,7 +1487,7 @@ impl PowerMeterApp {
         ui.label(RichText::new("Kalibrierung Messmodul (nur PowerMon-Box)").strong());
         ui.label(
             RichText::new(
-                "Gilt nur für die Messwerte der PowerMon-Box. Das OWON SPM misst mit seiner eigenen Kalibrierung.",
+                "Gilt nur für die Messwerte der PowerMon-Box. Das OWON SPM/SPE misst mit seiner eigenen Kalibrierung.",
             )
             .small()
             .color(COL_MUTED),
@@ -1368,7 +1667,7 @@ impl PowerMeterApp {
             ui.label(
                 RichText::new(
                     "Tasten: Leertaste = Pause · M = Marker · R = Statistik zurücksetzen · E = CSV-Export · \
-                     O = Ausgang AUS (OWON SPM)",
+                     O = Ausgang AUS (OWON SPM/SPE)",
                 )
                 .small(),
             );
@@ -1393,7 +1692,48 @@ impl PowerMeterApp {
             self.settings.spm_box_port.clone(),
             self.settings.spm_lock_panel,
         );
-        ui.label(RichText::new("OWON SPM").strong());
+        ui.label(RichText::new("OWON SPM/SPE").strong());
+        ui.label(
+            RichText::new("SPM: Netzteil mit eingebautem Multimeter. SPE: gleiches Netzteil, ohne Multimeter.")
+                .small()
+                .color(COL_MUTED),
+        );
+        // The first thing to try with a new supply: does it answer at all?
+        let spm_busy = self.power_running() && self.settings.power_kind.is_spm();
+        let target = match (self.settings.power_kind, self.settings.spm_port.as_str()) {
+            (PowerSourceKind::SpmSimulator, _) => "den Simulator".to_string(),
+            (_, "") => "den ersten USB-Seriell-Adapter (kein Port gewählt)".to_string(),
+            (_, port) => port.trim_start_matches("/dev/").to_string(),
+        };
+        egui::Frame::new()
+            .fill(Color32::from_rgb(0x1c, 0x22, 0x2b))
+            .corner_radius(8.0)
+            .inner_margin(egui::Margin::symmetric(10, 8))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let button = egui::Button::new(RichText::new("🔌 Verbindung prüfen").size(16.0).strong())
+                        .min_size(egui::vec2(190.0, 32.0));
+                    let r = ui
+                        .add_enabled(!spm_busy, button)
+                        .on_hover_text("Fragt das Netzteil einmal ab und zeigt, was es antwortet. Verstellt nichts.")
+                        .on_disabled_hover_text(
+                            "Erst oben „Trennen“ klicken – den Port kann immer nur ein Programm benutzen.",
+                        );
+                    if r.clicked() {
+                        self.start_probe(ui.ctx());
+                    }
+                    ui.vertical(|ui| {
+                        if spm_busy {
+                            ui.label(RichText::new("Erst trennen").color(COL_NOTE));
+                        } else {
+                            ui.label(format!("Prüft {target}"));
+                        }
+                        ui.label(
+                            RichText::new("Liest nur – schaltet nichts, verstellt nichts.").small().color(COL_MUTED),
+                        );
+                    });
+                });
+            });
         egui::Grid::new("spm_settings").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
             ui.label("Baudrate");
             baud_combo(ui, "spm_baud", &mut self.settings.spm_baud);
@@ -1436,6 +1776,40 @@ impl PowerMeterApp {
                     );
                 } else {
                     ui.label(RichText::new("aus").color(COL_MUTED));
+                }
+            });
+            ui.end_row();
+            ui.label("Schnellwahl");
+            ui.vertical(|ui| {
+                let mut remove = None;
+                for (k, p) in self.settings.psu_presets.iter_mut().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::DragValue::new(&mut p.v)
+                                .range(0.0..=60.0)
+                                .speed(0.01)
+                                .suffix(" V")
+                                .max_decimals(2)
+                                .custom_parser(parse_decimal),
+                        );
+                        ui.add(
+                            egui::DragValue::new(&mut p.i)
+                                .range(0.0..=20.0)
+                                .speed(0.001)
+                                .suffix(" A")
+                                .max_decimals(3)
+                                .custom_parser(parse_decimal),
+                        );
+                        if ui.small_button("✖").on_hover_text("Knopf entfernen").clicked() {
+                            remove = Some(k);
+                        }
+                    });
+                }
+                if let Some(k) = remove {
+                    self.settings.psu_presets.remove(k);
+                }
+                if self.settings.psu_presets.len() < 6 && ui.small_button("+ Knopf").clicked() {
+                    self.settings.psu_presets.push(Preset { v: 5.0, i: 1.0 });
                 }
             });
             ui.end_row();
@@ -1542,6 +1916,8 @@ impl eframe::App for PowerMeterApp {
         if self.show_settings {
             self.settings_window(&ctx);
         }
+        self.probe_window(&ctx);
+        self.preset_confirm_window(&ctx);
         // Keep the "stale" detection and toasts ticking even with no data.
         ctx.request_repaint_after(Duration::from_millis(250));
     }
@@ -1655,24 +2031,39 @@ fn conn_text(c: &ConnState) -> String {
 fn conn_dot(ui: &mut egui::Ui, c: &ConnState) {
     let color = match c {
         ConnState::Connected(_) => COL_CV,
-        ConnState::Connecting => COL_P,
+        ConnState::Connecting => COL_NOTE,
         ConnState::Error(_) => COL_CC,
         ConnState::Disconnected => COL_MUTED,
     };
     ui.label(RichText::new("●").color(color)).on_hover_text(conn_text(c));
 }
 
-fn port_combo(ui: &mut egui::Ui, id: &str, port: &mut String, ports: &[String]) {
-    let shown =
-        if port.is_empty() { "Port wählen …".to_string() } else { port.trim_start_matches("/dev/").to_string() };
-    egui::ComboBox::from_id_salt(id).selected_text(shown).width(170.0).show_ui(ui, |ui| {
+/// Port picker. Shows "COM5 – USB-SERIAL CH340" where the system names the
+/// adapter, stores the plain port name.
+fn port_combo(ui: &mut egui::Ui, id: &str, port: &mut String, ports: &[PortInfo]) {
+    let shown = if port.is_empty() {
+        "Port wählen …".to_string()
+    } else {
+        ports.iter().find(|p| p.name == *port).map_or(port.trim_start_matches("/dev/").to_string(), |p| p.label())
+    };
+    egui::ComboBox::from_id_salt(id).selected_text(shown).width(210.0).show_ui(ui, |ui| {
         if ports.is_empty() {
             ui.label("Kein USB-Gerät gefunden");
         }
         for p in ports {
-            ui.selectable_value(port, p.clone(), p.trim_start_matches("/dev/"));
+            ui.selectable_value(port, p.name.clone(), p.label());
         }
     });
+}
+
+/// B612 Mono Bold for the big readouts, as in the overlay.
+fn install_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(READOUT_FONT.into(), Arc::new(egui::FontData::from_static(crate::overlay::B612_MONO_BOLD)));
+    let mut family = vec![READOUT_FONT.to_string()];
+    family.extend(fonts.families.get(&egui::FontFamily::Monospace).cloned().unwrap_or_default());
+    fonts.families.insert(egui::FontFamily::Name(READOUT_FONT.into()), family);
+    ctx.set_fonts(fonts);
 }
 
 fn baud_combo(ui: &mut egui::Ui, id: &str, baud: &mut u32) {
@@ -1732,8 +2123,11 @@ fn readout(
     sub: Option<String>,
     badge: Option<(&str, Color32)>,
 ) {
+    // Instrument look, like the "Messgerät" overlay: big digits, unit below.
+    let font = |size: f32| egui::FontId::new(size, egui::FontFamily::Name(READOUT_FONT.into()));
     egui::Frame::new()
-        .fill(Color32::from_rgb(0x1c, 0x1e, 0x24))
+        .fill(Color32::from_rgb(0x0b, 0x0d, 0x10))
+        .stroke(egui::Stroke::new(1.0, Color32::from_white_alpha(14)))
         .corner_radius(12.0)
         .inner_margin(egui::Margin::symmetric(14, 10))
         .show(ui, |ui| {
@@ -1746,18 +2140,89 @@ fn readout(
                         self::badge(ui, text, c);
                     }
                 });
+                ui.label(readout_text(&value, font(size), color));
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(value).monospace().size(size).color(color).strong());
-                    ui.label(RichText::new(unit).size(size * 0.45).color(COL_MUTED));
+                    ui.label(RichText::new(unit).font(font((size * 0.3).max(13.0))).color(color.gamma_multiply(0.8)));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(RichText::new(sub.unwrap_or_default()).small().color(COL_MUTED));
+                    });
                 });
-                ui.label(RichText::new(sub.unwrap_or_default()).small().color(COL_MUTED));
             });
         });
+}
+
+/// Which device delivers the power values. A different one on connect
+/// starts with empty graphs, statistics and events; the same one again
+/// (e.g. after a USB hiccup) keeps them.
+fn power_source_id(st: &Settings) -> String {
+    match st.power_kind {
+        PowerSourceKind::PowerMon => format!("box|{}", st.power_port),
+        PowerSourceKind::OwonSpm if st.spm_use_box => format!("spm|{}|box|{}", st.spm_port, st.spm_box_port),
+        PowerSourceKind::OwonSpm => format!("spm|{}", st.spm_port),
+        PowerSourceKind::SpmSimulator => "spm-sim".into(),
+        PowerSourceKind::Simulator => "sim".into(),
+    }
+}
+
+/// The same for the multimeter.
+fn dmm_source_id(st: &Settings) -> String {
+    match st.dmm_kind {
+        DmmKind::OwonXdm => format!("xdm|{}", st.dmm_port),
+        DmmKind::OwonSpm => format!("spm|{}", st.spm_port),
+        DmmKind::Simulator => "sim".into(),
+        DmmKind::NoMeter => "none".into(),
+    }
+}
+
+/// A big reading. B612 Mono gives "." a whole digit cell with the dot at
+/// its left edge; pull the digit after it closer, like the overlay does.
+fn readout_text(value: &str, font: egui::FontId, color: Color32) -> egui::text::LayoutJob {
+    let normal = egui::TextFormat::simple(font.clone(), color);
+    // egui adds the extra spacing in front of each glyph of the section
+    let pulled = egui::TextFormat { extra_letter_spacing: -0.3 * font.size, ..normal.clone() };
+    let mut job = egui::text::LayoutJob::default();
+    match value.split_once('.') {
+        Some((int, frac)) if !frac.is_empty() => {
+            let first = frac.chars().next().map_or(0, char::len_utf8);
+            job.append(&format!("{int}."), 0.0, normal.clone());
+            job.append(&frac[..first], 0.0, pulled);
+            job.append(&frac[first..], 0.0, normal);
+        }
+        _ => job.append(value, 0.0, normal),
+    }
+    job
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_different_source_starts_clean() {
+        let mut st = Settings { power_kind: PowerSourceKind::OwonSpm, spm_port: "COM3".into(), ..Settings::default() };
+        let com3 = power_source_id(&st);
+        assert_eq!(power_source_id(&st.clone()), com3, "reconnecting the same supply keeps its data");
+        st.spm_port = "COM5".into();
+        assert_ne!(power_source_id(&st), com3);
+        st.spm_port = "COM3".into();
+        st.spm_use_box = true;
+        assert_ne!(power_source_id(&st), com3, "the box delivers the samples now");
+        st.power_kind = PowerSourceKind::SpmSimulator;
+        assert_ne!(power_source_id(&st), com3);
+        let none = dmm_source_id(&st);
+        st.dmm_kind = DmmKind::OwonXdm;
+        assert_ne!(dmm_source_id(&st), none);
+    }
+
+    #[test]
+    fn no_multimeter_is_the_default_and_old_settings_still_load() {
+        assert_eq!(Settings::default().dmm_kind, DmmKind::NoMeter);
+        let st: Settings = serde_json::from_str(r#"{"dmm_kind":"OwonXdm","dmm_port":"COM4"}"#).unwrap();
+        assert_eq!((st.dmm_kind, st.dmm_port.as_str()), (DmmKind::OwonXdm, "COM4"));
+        let st: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(st.dmm_kind, DmmKind::NoMeter);
+        assert_eq!(st.psu_presets.len(), 3);
+    }
 
     fn psu(v: f64, i: f64, ovp: f64, ocp: f64) -> PsuState {
         PsuState {

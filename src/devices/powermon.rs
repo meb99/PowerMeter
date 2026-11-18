@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 
 use super::{read_line, stopped};
-use crate::model::{ConnState, PowerSample, Shared};
+use crate::model::{ConnState, PowerSample, Resolution, Shared};
 
 pub struct PowerMonConfig {
     pub port: String,
@@ -121,6 +121,7 @@ fn session(cfg: &PowerMonConfig, store: &Shared, ctx: &egui::Context, stop: &Ato
                 let mut s = store.lock().unwrap();
                 let host_t = s.now();
                 let t = device_us.map_or(host_t, |us| clock.map(us, host_t));
+                s.power.resolution = Resolution::POWERMON;
                 s.push_power_sample(PowerSample { t, v, i });
                 drop(s);
                 ctx.request_repaint();

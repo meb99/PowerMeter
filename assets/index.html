@@ -2,27 +2,230 @@
 <html lang="de">
 <head>
 <meta charset="utf-8">
-<title>PowerMeter</title>
+<title>PowerMeter · Overlays</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-  body { font-family: -apple-system, "Helvetica Neue", Arial, sans-serif; background: #15171c; color: #eef; margin: 0; padding: 24px; }
-  h1 { margin-top: 0; }
-  code { background: #23262e; padding: 2px 6px; border-radius: 4px; }
-  a { color: #4cc9f0; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 16px; }
-  .card { background: #1d2027; border-radius: 12px; padding: 12px; }
-  iframe { border: 0; width: 100%; height: 340px; background: repeating-conic-gradient(#333 0 25%, #444 0 50%) 0 0/20px 20px; border-radius: 8px; }
+  :root {
+    color-scheme: dark;
+    --bg: #131519; --panel: #1b1e23; --panel2: #23272d; --line: #323840; --line2: #3e454f;
+    --text: #e9ebee; --muted: #9aa2ac; --faint: #6c747e; --accent: #4cc9f0; --accent-ink: #032029; --ok: #30d158;
+    --ui: -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", system-ui, "Helvetica Neue", Arial, sans-serif;
+    --mono: "SF Mono", "Cascadia Mono", Consolas, Menlo, "DejaVu Sans Mono", monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.45 var(--ui); -webkit-font-smoothing: antialiased; }
+  a { color: var(--accent); }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 28px 24px 40px; }
+  .hero { display: flex; align-items: center; gap: 16px 24px; flex-wrap: wrap; margin-bottom: 22px; }
+  .hero h1 { margin: 0; font-size: 26px; letter-spacing: -.01em; }
+  .hero p { margin: 4px 0 0; color: var(--muted); max-width: 620px; }
+  .hero .grow { flex: 1 1 360px; }
+  .btn { display: inline-flex; align-items: center; justify-content: center; gap: 7px; height: 34px; padding: 0 14px;
+    border-radius: 8px; border: 1px solid var(--line2); background: var(--panel2); color: var(--text); cursor: pointer;
+    font: inherit; font-size: 14px; font-weight: 500; text-decoration: none; white-space: nowrap; }
+  .btn:hover { background: #2c3138; }
+  .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 650; }
+  .btn.primary:hover { background: #74d7f5; }
+  .btn.big { height: 46px; padding: 0 22px; font-size: 16px; border-radius: 11px; }
+  .chip { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; color: var(--muted); padding: 4px 11px;
+    border-radius: 999px; background: var(--panel2); border: 1px solid var(--line); }
+  .chip i { width: 8px; height: 8px; border-radius: 50%; background: #ffb000; }
+  .chip.live i { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
+
+  .list { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 520px), 1fr)); gap: 18px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; display: flex; flex-direction: column; }
+  .pv { height: 250px; display: grid; place-items: center; overflow: hidden; position: relative;
+    background:
+      radial-gradient(ellipse 40% 50% at 72% 38%, rgba(255,178,102,.40), transparent 70%),
+      radial-gradient(ellipse 45% 40% at 24% 72%, rgba(46,128,96,.50), transparent 70%),
+      radial-gradient(circle at 86% 84%, rgba(90,130,255,.28), transparent 28%),
+      linear-gradient(160deg, #2c2520 0%, #15181b 55%, #0b0d0f 100%); }
+  .pv > div { position: absolute; left: 50%; top: 50%; transform-origin: center; }
+  .info { padding: 14px 16px 16px; display: grid; gap: 10px; }
+  .name { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  .name b { font-size: 17px; }
+  .name .star { color: #ffd60a; font-size: 13px; font-weight: 600; }
+  .name .size { margin-left: auto; color: var(--muted); font-size: 13px; }
+  .name .size b { font: 600 13px var(--mono); color: var(--text); }
+  .url { display: flex; gap: 8px; }
+  .url input { flex: 1; min-width: 0; font: 13px var(--mono); color: var(--text); background: #0f1114; border: 1px solid var(--line2);
+    border-radius: 8px; padding: 0 10px; height: 34px; }
+  .empty { color: var(--muted); padding: 30px 0; }
+  .how { margin-top: 30px; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); gap: 18px; }
+  .how section { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 16px 18px; }
+  .how h2 { margin: 0 0 8px; font-size: 15px; }
+  .how ol, .how p { margin: 0; color: var(--muted); font-size: 14px; }
+  .how ol { padding-left: 18px; }
+  .how b { color: var(--text); font-weight: 600; }
+  code { font: 13px var(--mono); background: var(--panel2); padding: 1px 6px; border-radius: 5px; color: var(--text); }
+  #toast { position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%) translateY(20px); opacity: 0; transition: .2s;
+    background: #2a2f36; border: 1px solid var(--line2); padding: 9px 14px; border-radius: 10px; pointer-events: none; }
+  #toast.show { opacity: 1; transform: translateX(-50%); }
+  @media (max-width: 600px) { .wrap { padding: 20px 16px 32px; } .pv { height: 190px; } }
 </style>
 </head>
 <body>
-<h1>PowerMeter · OBS-Overlay</h1>
-<p>In OBS: <b>Quellen → + → Browser</b>, URL einfügen, Breite 700 / Höhe 400, „Benutzerdefiniertes CSS" leeren.</p>
-<div class="grid">
-  <div class="card"><p>Standard-Kachel: <code><a href="/overlay">/overlay</a></code></p><iframe src="/overlay"></iframe></div>
-  <div class="card"><p>Leiste unten: <code><a href="/overlay?layout=bar&show=v,i,p,mode,graph,dmm">/overlay?layout=bar&amp;show=v,i,p,mode,graph,dmm</a></code></p><iframe src="/overlay?layout=bar&show=v,i,p,mode,graph,dmm"></iframe></div>
-  <div class="card"><p>Alles inkl. Energie & Ereignisse: <code><a href="/overlay?show=v,i,p,mode,set,graph,dmm,energy,events&graph=v,i,p">/overlay?show=v,i,p,mode,set,graph,dmm,energy,events&amp;graph=v,i,p</a></code></p><iframe src="/overlay?show=v,i,p,mode,set,graph,dmm,energy,events&graph=v,i,p"></iframe></div>
-  <div class="card"><p>Nur Multimeter: <code><a href="/overlay?show=dmm&scale=1.4">/overlay?show=dmm&amp;scale=1.4</a></code></p><iframe src="/overlay?show=dmm&scale=1.4"></iframe></div>
+<div class="wrap">
+  <div class="hero">
+    <div class="grow">
+      <h1>PowerMeter · OBS-Overlays</h1>
+      <p>Deine Designs mit Live-Werten. Jedes hat eine eigene URL für eine Browser-Quelle in OBS.
+        Ändern, neu anlegen und Logo hochladen geht im Overlay-Studio.</p>
+    </div>
+    <span class="chip" id="source"><i></i><span>…</span></span>
+    <a class="btn primary big" href="/studio">🎨 Overlay-Studio öffnen</a>
+  </div>
+
+  <div class="list" id="list"><div class="empty">Lade Designs …</div></div>
+
+  <div class="how">
+    <section>
+      <h2>So kommt ein Design in OBS</h2>
+      <ol>
+        <li><b>URL kopieren</b> beim gewünschten Design</li>
+        <li>OBS: <b>Quellen → + → Browser</b>, URL einfügen</li>
+        <li><b>Breite</b> und <b>Höhe</b> wie angegeben eintragen, „Benutzerdefiniertes CSS“ leeren</li>
+      </ol>
+    </section>
+    <section>
+      <h2>Live geändert</h2>
+      <p>Was du im Studio änderst, erscheint in OBS sofort – die Quelle musst du nicht neu laden.
+        <code>/overlay</code> zeigt immer dein Standard-Design (★).</p>
+    </section>
+    <section>
+      <h2>Für Bastler</h2>
+      <p>Rohdaten als JSON: <a href="/api/live"><code>/api/live</code></a>, als Stream: <code>/events</code>.
+        Alle Felder und die alten URL-Parameter stehen in <code>docs/OVERLAY.md</code>.</p>
+    </section>
+  </div>
 </div>
-<p>Rohdaten: <code><a href="/api/live">/api/live</a></code> (JSON) · Stream: <code>/events</code> (Server-Sent Events)</p>
+<div id="toast" role="status"></div>
+
+<script src="/overlay.js"></script>
+<script>
+(function () {
+  'use strict';
+  const $ = id => document.getElementById(id);
+  let cards = [], rev = null, live = null, demo = null, demoTimer = 0, loading = false;
+
+  function el(tag, cls, text) {
+    const e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text != null) e.textContent = text;
+    return e;
+  }
+
+  let toastTimer = 0;
+  function toast(t) {
+    $('toast').textContent = t;
+    $('toast').classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => $('toast').classList.remove('show'), 2600);
+  }
+
+  async function getJson(path) {
+    const r = await fetch(path, { cache: 'no-store' });
+    if (!r.ok) throw new Error(r.status);
+    return r.json();
+  }
+
+  function fit(c) {
+    const bw = c.pv.clientWidth - 32, bh = c.pv.clientHeight - 32;
+    if (!c.size.w || bw <= 0) return;
+    const s = Math.min(1.25, bw / c.size.w, bh / c.size.h);
+    c.wrap.style.width = c.size.w + 'px';
+    c.wrap.style.height = c.size.h + 'px';
+    c.wrap.style.transform = `translate(-50%, -50%) scale(${s})`;
+    c.ov.setFit(s);
+  }
+
+  async function load() {
+    if (loading) return;
+    loading = true;
+    try {
+      const j = await getJson('/api/designs');
+      rev = j.rev;
+      const full = await Promise.all(j.designs.map(d => getJson('/api/designs/' + encodeURIComponent(d.id))));
+      cards.forEach(c => c.ov.destroy());
+      cards = [];
+      const list = $('list');
+      while (list.firstChild) list.removeChild(list.firstChild);
+      for (const d of full) list.appendChild(card(d));
+      feed();
+    } catch (e) {
+      setTimeout(load, 2000);
+    } finally {
+      loading = false;
+    }
+  }
+
+  function card(d) {
+    const box = el('article', 'card');
+    const pv = el('div', 'pv');
+    const wrap = el('div');
+    const host = el('div');
+    wrap.appendChild(host);
+    pv.appendChild(wrap);
+    const info = el('div', 'info');
+    const name = el('div', 'name');
+    name.appendChild(el('b', null, d.name));
+    if (d.is_default) name.appendChild(el('span', 'star', '★ Standard · auch unter /overlay'));
+    const size = el('span', 'size');
+    const dims = PowerOverlay.measure(d.cfg);
+    size.append(document.createTextNode('OBS: '), el('b', null, dims.w + ' × ' + dims.h));
+    size.title = 'Breite × Höhe für die Browser-Quelle';
+    name.appendChild(size);
+    const url = el('div', 'url');
+    const inp = el('input');
+    inp.readOnly = true;
+    inp.value = d.url;
+    inp.setAttribute('aria-label', 'URL von ' + d.name);
+    const copy = el('button', 'btn primary', 'URL kopieren');
+    copy.onclick = async () => {
+      try { await navigator.clipboard.writeText(d.url); } catch (e) { inp.select(); document.execCommand('copy'); }
+      toast('URL kopiert – jetzt in OBS einfügen.');
+    };
+    const edit = el('a', 'btn', 'Bearbeiten');
+    edit.href = '/studio/' + encodeURIComponent(d.id);
+    url.append(inp, copy, edit);
+    info.append(name, url);
+    box.append(pv, info);
+    const c = { pv, wrap, size: { w: 0, h: 0 }, ov: null };
+    c.ov = PowerOverlay.mount(host, d, { never_stale: true, onResize: s => { c.size = s; fit(c); } });
+    cards.push(c);
+    return box;
+  }
+
+  function feed() {
+    const d = live && (live.power_connected || live.dmm_connected) ? live : demo.next();
+    cards.forEach(c => c.ov.update(d));
+  }
+
+  function showSource() {
+    const on = live && (live.power_connected || live.dmm_connected);
+    $('source').className = 'chip' + (on ? ' live' : '');
+    $('source').lastChild.textContent = on ? 'Live' + (live.psu_model ? ': ' + live.psu_model : '')
+      : 'Beispielwerte · kein Gerät verbunden';
+    clearInterval(demoTimer);
+    if (!on) demoTimer = setInterval(feed, 100);
+  }
+
+  demo = PowerOverlay.demo({ start: 6 });
+  let wasLive = null;
+  PowerOverlay.connect(d => {
+    live = d;
+    const on = d.power_connected || d.dmm_connected;
+    if (on !== wasLive) { wasLive = on; showSource(); }
+    if (on) feed();
+    if (rev !== null && d.design_rev !== rev) load();
+  }, { spark: 60, onDown: () => { live = null; wasLive = null; showSource(); } });
+
+  showSource();
+  load();
+  window.addEventListener('resize', () => cards.forEach(fit));
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => cards.forEach(fit));
+})();
+</script>
 </body>
 </html>

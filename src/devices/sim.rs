@@ -21,7 +21,7 @@ use eframe::egui;
 use super::owon_spm::{self, SpmConfig};
 use super::{DmmCommand, PsuCommand, ScpiPort, stopped};
 use crate::format;
-use crate::model::{ConnState, DmmFunction, Shared};
+use crate::model::{ConnState, DmmFunction, Resolution, Shared};
 
 pub const SIM_VSET: f64 = 19.0;
 pub const SIM_ISET: f64 = 1.0;
@@ -95,7 +95,10 @@ pub fn run_power(store: Shared, ctx: egui::Context, rate_hz: f64, stop: Arc<Atom
     while !stopped(&stop) {
         let t = start.elapsed().as_secs_f64() % SCENARIO_LEN;
         let (v, i) = psu_output(t, load_at(t), &mut noise);
-        store.lock().unwrap().push_power(v, i);
+        let mut s = store.lock().unwrap();
+        s.power.resolution = Resolution::SIMULATOR;
+        s.push_power(v, i);
+        drop(s);
         ctx.request_repaint();
         next += period;
         let now = Instant::now();

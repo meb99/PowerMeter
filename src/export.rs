@@ -2,15 +2,31 @@
 
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Local, TimeDelta};
 
 use crate::model::{DmmSample, PowerEvent, PowerSample, Shared};
 
+/// `Documents/PowerMeter` in the user's home (`%USERPROFILE%` on Windows).
 pub fn export_dir() -> PathBuf {
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+    let home = if cfg!(target_os = "windows") { std::env::var_os("USERPROFILE") } else { None };
+    let home = home.or_else(|| std::env::var_os("HOME")).map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
     home.join("Documents").join("PowerMeter")
+}
+
+/// Shows the folder in Finder or Explorer (elsewhere: nothing).
+pub fn reveal(dir: &Path) {
+    let opener = if cfg!(target_os = "windows") {
+        Some("explorer")
+    } else if cfg!(target_os = "macos") {
+        Some("open")
+    } else {
+        None
+    };
+    if let Some(cmd) = opener {
+        let _ = std::process::Command::new(cmd).arg(dir).spawn();
+    }
 }
 
 /// Writes `netzteil.csv`, `multimeter.csv` and `ereignisse.csv` into a new

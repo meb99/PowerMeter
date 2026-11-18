@@ -30,6 +30,35 @@ impl PowerSample {
     }
 }
 
+/// Decimals the current sample source really resolves. Showing more would
+/// only show noise or made-up zeros (an SPE reads back in 10 mV / 1 mA).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Resolution {
+    pub v: usize,
+    pub i: usize,
+    pub p: usize,
+}
+
+impl Resolution {
+    /// PowerMon box (INA228): ~0.2 mV / 0.02 mA.
+    pub const POWERMON: Resolution = Resolution { v: 3, i: 4, p: 3 };
+    /// OWON SPM/SPE read-back: 10 mV / 1 mA.
+    pub const SPM: Resolution = Resolution { v: 2, i: 3, p: 2 };
+    pub const SIMULATOR: Resolution = Resolution { v: 3, i: 4, p: 3 };
+
+    /// Decimals for a power reading: one fewer from 100 W on, so the
+    /// readout keeps its width.
+    pub fn p_for(self, p: f64) -> usize {
+        if p.abs() >= 100.0 { self.p.saturating_sub(1) } else { self.p }
+    }
+}
+
+impl Default for Resolution {
+    fn default() -> Self {
+        Resolution::POWERMON
+    }
+}
+
 /// `value` is NaN when the meter reports overload (OL).
 #[derive(Clone, Copy, Debug, Serialize)]
 pub struct DmmSample {
@@ -387,6 +416,11 @@ impl EventKind {
 const RAMP_V_PER_S: f64 = 5.0;
 /// Device mode older than this is not trusted any more.
 const DEVICE_FRESH_S: f64 = 1.5;
+/// Below this current (or 2 % of the limit) there is no current limit.
+const CC_MIN_AMPS: f64 = 0.005;
+/// A dip or CC that started this shortly before the supply reported its
+/// output off belongs to switching off.
+const SWITCH_OFF_GRACE_S: f64 = 1.0;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct PowerEvent {
@@ -535,6 +569,14 @@ impl PowerAnalyzer {
             // because of a bad contact.
             self.discard_open_dropout();
         }
+        let switched_off = dev.output_on == Some(false) && prev.as_ref().is_some_and(|p| p.output_on == Some(true));
+        if switched_off {
+            // The output falling after "off" (reported a moment late) is
+            // neither a dip nor a current limit.
+            self.discard_open(EventKind::Dropout, now - SWITCH_OFF_GRACE_S);
+            self.discard_open(EventKind::CurrentLimit, now - SWITCH_OFF_GRACE_S);
+            self.dip_i = (0.0, 0.0, 0, 0.0);
+        }
         if (switched_on || new_vset)
             && let Some(target) = dev.v_set
         {
@@ -583,20 +625,40 @@ impl PowerAnalyzer {
         (d.output_on == Some(false) && fresh(d.output_read)).then_some(RegMode::Off)
     }
 
+    /// The supply recently said its output is off.
+    fn output_reported_off(&self, t: f64) -> bool {
+        self.device.as_ref().is_some_and(|d| {
+            d.output_on == Some(false) && d.output_read.or(d.updated).is_some_and(|u| t - u < DEVICE_FRESH_S)
+        })
+    }
+
     fn discard_open_dropout(&mut self) {
-        if let Some(idx) = self.open_dropout.take()
-            && idx < self.events.len()
-        {
-            self.events.remove(idx);
-            for open in [&mut self.open_cc, &mut self.open_short, &mut self.open_protection] {
-                if let Some(i) = open.as_mut()
-                    && *i > idx
-                {
-                    *i -= 1;
-                }
+        self.discard_open(EventKind::Dropout, f64::NEG_INFINITY);
+        self.dip_i = (0.0, 0.0, 0, 0.0);
+    }
+
+    /// Removes the open event of `kind` if it started at or after `since`.
+    fn discard_open(&mut self, kind: EventKind, since: f64) {
+        let slot = match kind {
+            EventKind::Dropout => &mut self.open_dropout,
+            EventKind::CurrentLimit => &mut self.open_cc,
+            EventKind::Short => &mut self.open_short,
+            EventKind::Protection => &mut self.open_protection,
+            EventKind::Marker => return,
+        };
+        let Some(idx) = *slot else { return };
+        if self.events.get(idx).is_none_or(|e| e.t_start < since) {
+            return;
+        }
+        *slot = None;
+        self.events.remove(idx);
+        for open in [&mut self.open_dropout, &mut self.open_cc, &mut self.open_short, &mut self.open_protection] {
+            if let Some(i) = open.as_mut()
+                && *i > idx
+            {
+                *i -= 1;
             }
         }
-        self.dip_i = (0.0, 0.0, 0, 0.0);
     }
 
     pub fn push(&mut self, s: &PowerSample, cfg: &AnalysisSettings) {
@@ -619,11 +681,21 @@ impl PowerAnalyzer {
 
         // --- regulation mode -------------------------------------------------
         let device_mode = self.device_mode(s.t);
-        let sample_cc = i_lim.is_some_and(|lim| lim > 0.0 && s.i >= lim * (1.0 - cfg.cc_tol_pct / 100.0));
+        // CC needs current: at ~0 A it is the output switching or ramping.
+        let current_flows = s.i > (0.02 * i_lim.unwrap_or(0.0)).max(CC_MIN_AMPS);
+        let sample_cc =
+            current_flows && i_lim.is_some_and(|lim| lim > 0.0 && s.i >= lim * (1.0 - cfg.cc_tol_pct / 100.0));
+        // The supply says CC, but nothing flows: it is switching the output
+        // on or off. Neither a current limit nor a dip.
+        let switching = device_mode == Some(RegMode::Cc) && !current_flows;
         let raw = if let Some(m) = device_mode {
             // The supply reports CC up to ~0.4 s late; samples from the box
             // at the limit already show it. They win over a reported CV.
-            if m == RegMode::Cv && sample_cc { RegMode::Cc } else { m }
+            match m {
+                RegMode::Cv if sample_cc => RegMode::Cc,
+                RegMode::Cc if switching => RegMode::Unknown,
+                m => m,
+            }
         } else if s.v < 0.05 && s.i.abs() < 0.002 {
             RegMode::Off
         } else if sample_cc {
@@ -665,12 +737,13 @@ impl PowerAnalyzer {
 
         // --- events ----------------------------------------------------------
         let is_short = s.v < cfg.short_volts && s.i > 0.01 && v_ref.is_some_and(|vr| vr > cfg.short_volts * 3.0);
-        let is_cc = raw == RegMode::Cc && !is_short;
+        // Nothing opens while the output ramps or is reported off.
+        let quiet = in_ramp || switching || raw == RegMode::Off || self.output_reported_off(s.t);
+        let is_cc = raw == RegMode::Cc && !is_short && !quiet;
         let is_dropout = !is_short
             && !is_cc
-            && !in_ramp
-            && v_ref.is_some_and(|vr| vr > 0.5 && s.v < vr * (1.0 - cfg.dropout_pct / 100.0))
-            && raw != RegMode::Off;
+            && !quiet
+            && v_ref.is_some_and(|vr| vr > 0.5 && s.v < vr * (1.0 - cfg.dropout_pct / 100.0));
 
         self.track(EventKind::Short, is_short, s);
         self.track(EventKind::CurrentLimit, is_cc, s);
@@ -806,6 +879,8 @@ pub struct PowerData {
     pub samples: VecDeque<PowerSample>,
     pub analyzer: PowerAnalyzer,
     pub seq: u64,
+    /// Set by the driver that pushes the samples.
+    pub resolution: Resolution,
 }
 
 #[derive(Default)]
@@ -917,6 +992,21 @@ impl Store {
         self.power.analyzer.device = old.device;
         self.power.analyzer.ramp_until = old.ramp_until;
         self.power.analyzer.last = old.last;
+        self.clear_dmm();
+    }
+
+    /// Forgets everything a previous power source measured (samples,
+    /// statistics, events, learned set points), so the readings of a
+    /// simulator and a real supply never mix.
+    pub fn clear_power_source(&mut self) {
+        self.power.samples.clear();
+        self.power.analyzer = PowerAnalyzer::default();
+        self.power.psu = None;
+        self.power.resolution = Resolution::default();
+        self.power.seq += 1;
+    }
+
+    pub fn clear_dmm(&mut self) {
         self.dmm.samples.clear();
         self.dmm.stats = MinMax::default();
     }
@@ -1199,6 +1289,49 @@ mod tests {
     }
 
     #[test]
+    fn switching_the_output_opens_no_events() {
+        // What an SPE3103 did on the bench: 2 V / 2 A, nothing connected.
+        // After "on" it reports CC (mode 2) for a moment at 0 A while the
+        // output ramps in 0.3 s steps; after "off" CC again while it falls.
+        let cfg = AnalysisSettings::default();
+        let mut a = PowerAnalyzer::default();
+        let dev = |on: bool, mode: PsuMode, t: f64| PsuState { mode, ..spm(2.0, 2.0, on, t) };
+        let mut t = 0.0;
+        for _ in 0..10 {
+            a.on_device(&dev(false, PsuMode::Standby, t), t);
+            t = feed_hz(&mut a, &cfg, t, 0.1, 10.0, 0.0, 0.0);
+        }
+        for (k, v) in [0.0, 0.0, 0.0, 0.7, 0.7, 0.7, 1.4, 1.4, 1.4, 2.0, 2.0, 2.0].into_iter().enumerate() {
+            let mode = if k < 4 { PsuMode::Cc } else { PsuMode::Cv };
+            a.on_device(&dev(true, mode, t), t);
+            t = feed_hz(&mut a, &cfg, t, 0.1, 10.0, v, 0.0);
+            assert_ne!(a.mode, RegMode::Cc, "no CC badge at 0 A");
+        }
+        for _ in 0..20 {
+            a.on_device(&dev(true, PsuMode::Cv, t), t);
+            t = feed_hz(&mut a, &cfg, t, 0.1, 10.0, 2.0, 0.0);
+        }
+        // off: one more CC report at 0 A, then standby while it decays
+        a.on_device(&dev(true, PsuMode::Cc, t), t);
+        t = feed_hz(&mut a, &cfg, t, 0.1, 10.0, 1.2, 0.0);
+        for v in [0.6, 0.2, 0.0, 0.0] {
+            a.on_device(&dev(false, PsuMode::Standby, t), t);
+            t = feed_hz(&mut a, &cfg, t, 0.1, 10.0, v, 0.0);
+        }
+        assert!(a.events.is_empty(), "{:?}", a.events);
+        assert_eq!(a.mode, RegMode::Off);
+
+        // with a load the supply's CC is real again
+        let cfg = AnalysisSettings::default();
+        let mut b = PowerAnalyzer::default();
+        let t = feed_hz(&mut b, &cfg, 0.0, 0.5, 10.0, 2.0, 0.5);
+        b.on_device(&dev(true, PsuMode::Cc, t), t);
+        feed_hz(&mut b, &cfg, t, 0.5, 10.0, 1.6, 2.0);
+        assert!(b.active(EventKind::CurrentLimit));
+        assert_eq!(b.mode, RegMode::Cc);
+    }
+
+    #[test]
     fn detects_real_dropout_at_10_hz() {
         let cfg = AnalysisSettings::default();
         let mut a = PowerAnalyzer::default();
@@ -1321,6 +1454,25 @@ mod tests {
         feed_hz(&mut a, &cfg, t, 1.0, 100.0, 5.0, 0.3);
         assert!(a.events.is_empty(), "{:?}", a.events);
         assert_eq!(a.learned_iset, Some(2.0));
+    }
+
+    #[test]
+    fn a_new_source_starts_clean() {
+        let mut s = Store::default();
+        s.set_psu(spm(12.0, 1.0, true, 0.0));
+        s.power.resolution = Resolution::SPM;
+        for k in 0..200 {
+            let v = if (100..140).contains(&k) { 6.0 } else { 12.0 };
+            s.push_power_sample_uncalibrated(PowerSample { t: k as f64 * 0.01, v, i: v / 24.0 });
+        }
+        s.push_dmm(3.3);
+        assert!(!s.power.samples.is_empty() && !s.power.analyzer.events.is_empty());
+        let seq = s.power.seq;
+        s.clear_power_source();
+        assert!(s.power.samples.is_empty() && s.power.analyzer.events.is_empty() && s.power.psu.is_none());
+        assert_eq!((s.power.analyzer.energy_wh, s.power.resolution), (0.0, Resolution::default()));
+        assert!(s.power.seq > seq, "the graphs must notice");
+        assert_eq!(s.dmm.samples.len(), 1, "the multimeter is a different device");
     }
 
     #[test]

@@ -24,7 +24,8 @@ pub enum PowerSourceKind {
     #[default]
     PowerMon,
     /// OWON SPM3051/6053/3103/6103: programmable supply with built-in
-    /// multimeter, SCPI over USB serial.
+    /// multimeter, SCPI over USB serial. The SPE models (same supply, no
+    /// multimeter) too.
     OwonSpm,
     /// The real SPM driver talking to a simulated SPM.
     SpmSimulator,
@@ -42,8 +43,8 @@ impl PowerSourceKind {
     pub fn label(self) -> &'static str {
         match self {
             PowerSourceKind::PowerMon => "PowerMon (INA228, USB)",
-            PowerSourceKind::OwonSpm => "OWON SPM (USB)",
-            PowerSourceKind::SpmSimulator => "OWON SPM (Simulator)",
+            PowerSourceKind::OwonSpm => "OWON SPM/SPE (USB)",
+            PowerSourceKind::SpmSimulator => "OWON SPM/SPE (Simulator)",
             PowerSourceKind::Simulator => "Simulator",
         }
     }
@@ -56,22 +57,25 @@ impl PowerSourceKind {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum DmmKind {
-    /// OWON XDM1041 / XDM1241 / XDM2041 over USB serial (SCPI).
+    /// No multimeter: tile and graph stay hidden.
     #[default]
+    NoMeter,
+    /// OWON XDM1041 / XDM1241 / XDM2041 over USB serial (SCPI).
     OwonXdm,
-    /// The multimeter built into an OWON SPM supply; runs on the supply's
-    /// own connection.
+    /// The multimeter built into an OWON SPM supply (not the SPE); runs on
+    /// the supply's own connection.
     OwonSpm,
     Simulator,
 }
 
 impl DmmKind {
-    pub const ALL: [DmmKind; 3] = [DmmKind::OwonXdm, DmmKind::OwonSpm, DmmKind::Simulator];
+    pub const ALL: [DmmKind; 4] = [DmmKind::NoMeter, DmmKind::OwonXdm, DmmKind::OwonSpm, DmmKind::Simulator];
 
     pub fn label(self) -> &'static str {
         match self {
+            DmmKind::NoMeter => "Kein Multimeter",
             DmmKind::OwonXdm => "OWON XDM1241 (SCPI)",
-            DmmKind::OwonSpm => "Im Netzteil (OWON SPM)",
+            DmmKind::OwonSpm => "Im Netzteil (nur OWON SPM)",
             DmmKind::Simulator => "Simulator",
         }
     }
@@ -168,19 +172,83 @@ pub fn stopped(stop: &AtomicBool) -> bool {
     stop.load(Ordering::Relaxed)
 }
 
+/// A serial port as offered in the UI. `name` is what gets stored and
+/// opened (`/dev/cu.usbserial-1410`, `COM5`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PortInfo {
+    pub name: String,
+    /// What the system calls the adapter, e.g. "USB-SERIAL CH340" (Windows).
+    pub description: Option<String>,
+    pub usb_vid: Option<u16>,
+}
+
+impl PortInfo {
+    /// "COM5 – USB-SERIAL CH340", or the short name alone.
+    pub fn label(&self) -> String {
+        let short = self.name.trim_start_matches("/dev/");
+        match &self.description {
+            Some(d) => format!("{short} – {d}"),
+            None => short.to_string(),
+        }
+    }
+
+    /// A USB-serial adapter like the CH340 in the OWON supplies (or a
+    /// CP210x / FTDI / Prolific one).
+    pub fn looks_like_usb_serial(&self) -> bool {
+        // WCH (CH340/CH341), Silicon Labs (CP210x), FTDI, Prolific
+        const VIDS: [u16; 4] = [0x1a86, 0x10c4, 0x0403, 0x067b];
+        let text = format!("{} {}", self.name, self.description.as_deref().unwrap_or("")).to_ascii_lowercase();
+        self.usb_vid.is_some_and(|v| VIDS.contains(&v))
+            || ["usbserial", "usb-serial", "usb serial", "wchusb", "ch340", "ch341", "cp210", "slab_usb", "ttyusb"]
+                .iter()
+                .any(|k| text.contains(k))
+    }
+}
+
 /// Serial ports worth offering. On macOS every device shows up twice
-/// (`/dev/tty.*` and `/dev/cu.*`); the `cu` node is the one to open.
-pub fn list_ports() -> Vec<String> {
-    let mut ports: Vec<String> = serialport::available_ports()
+/// (`/dev/tty.*` and `/dev/cu.*`); the `cu` node is the one to open. On
+/// Windows the ports are `COM3`, `COM5` … with the adapter's name beside.
+pub fn list_ports() -> Vec<PortInfo> {
+    let mut ports: Vec<PortInfo> = serialport::available_ports()
         .unwrap_or_default()
         .into_iter()
-        .map(|p| p.port_name)
-        .filter(|n| !n.contains("Bluetooth") && !n.contains("debug-console"))
-        .filter(|n| !(cfg!(target_os = "macos") && n.starts_with("/dev/tty.")))
+        .map(|p| {
+            let (description, usb_vid) = match p.port_type {
+                serialport::SerialPortType::UsbPort(u) => (port_description(&p.port_name, u.product), Some(u.vid)),
+                _ => (None, None),
+            };
+            PortInfo { name: p.port_name, description, usb_vid }
+        })
+        .filter(|p| !p.name.contains("Bluetooth") && !p.name.contains("debug-console"))
+        .filter(|p| !(cfg!(target_os = "macos") && p.name.starts_with("/dev/tty.")))
         .collect();
-    ports.sort();
-    ports.dedup();
+    ports.sort_by_key(|p| port_order(&p.name));
+    ports.dedup_by(|a, b| a.name == b.name);
     ports
+}
+
+/// Windows names the adapter "USB-SERIAL CH340 (COM5)"; the port is shown
+/// anyway. Other systems' names are mostly the device path again.
+fn port_description(port: &str, product: Option<String>) -> Option<String> {
+    if !cfg!(target_os = "windows") {
+        return None;
+    }
+    let p = product?;
+    let d = p.trim().strip_suffix(&format!("({port})")).unwrap_or(&p).trim().to_string();
+    (!d.is_empty()).then_some(d)
+}
+
+/// `COM3` before `COM10`; everything else alphabetically.
+fn port_order(name: &str) -> (String, u32) {
+    let digits = name.len() - name.trim_end_matches(|c: char| c.is_ascii_digit()).len();
+    let (stem, num) = name.split_at(name.len() - digits);
+    (stem.to_string(), num.parse().unwrap_or(0))
+}
+
+/// First port that looks like a USB-serial adapter (`--probe-spm auto`,
+/// "Verbindung prüfen" without a chosen port).
+pub fn auto_port(ports: &[PortInfo]) -> Option<&PortInfo> {
+    ports.iter().find(|p| p.looks_like_usb_serial())
 }
 
 /// Reads one `\n`-terminated line with an overall deadline. Returns
@@ -433,6 +501,34 @@ mod tests {
         let mut link = ScpiLink::new(ScriptPort::new("", 0));
         assert!(link.send_checked("VOLT 5.000").unwrap());
         assert!(!link.send_checked("BAD 1").unwrap());
+    }
+
+    #[test]
+    fn finds_the_usb_serial_adapter() {
+        let port = |name: &str, desc: Option<&str>, vid: Option<u16>| PortInfo {
+            name: name.into(),
+            description: desc.map(Into::into),
+            usb_vid: vid,
+        };
+        let ports = vec![
+            port("COM1", None, None),
+            port("/dev/cu.Bluetooth-Incoming-Port", None, None),
+            port("COM3", Some("USB-SERIAL CH340"), Some(0x1a86)),
+            port("/dev/cu.usbserial-1410", None, None),
+        ];
+        assert_eq!(auto_port(&ports).map(|p| p.name.as_str()), Some("COM3"));
+        assert_eq!(auto_port(&ports[3..]).map(|p| p.name.as_str()), Some("/dev/cu.usbserial-1410"));
+        assert!(port("/dev/ttyUSB0", None, None).looks_like_usb_serial());
+        assert!(port("COM7", Some("Silicon Labs CP210x USB to UART Bridge"), None).looks_like_usb_serial());
+        assert!(
+            !port("COM4", Some("Intel(R) Active Management Technology - SOL"), Some(0x8086)).looks_like_usb_serial()
+        );
+        assert_eq!(auto_port(&ports[..2]), None);
+        assert_eq!(ports[2].label(), "COM3 – USB-SERIAL CH340");
+        assert_eq!(ports[3].label(), "cu.usbserial-1410");
+        let mut names = ["COM10", "COM3", "/dev/cu.b", "COM1"];
+        names.sort_by_key(|n| port_order(n));
+        assert_eq!(names, ["/dev/cu.b", "COM1", "COM3", "COM10"]);
     }
 
     #[test]

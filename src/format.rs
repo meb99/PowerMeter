@@ -45,6 +45,17 @@ pub fn fixed(value: f64, decimals: usize) -> String {
     if value.is_finite() { format!("{value:.decimals$}") } else { "----".into() }
 }
 
+/// Dashes in the shape of a reading while there is none, e.g.
+/// `placeholder(3, 2)` → `"--.---"`.
+pub fn placeholder(decimals: usize, int_digits: usize) -> String {
+    let mut s = "-".repeat(int_digits);
+    if decimals > 0 {
+        s.push('.');
+        s.push_str(&"-".repeat(decimals));
+    }
+    s
+}
+
 /// `mm:ss.s` or `h:mm:ss` for a duration in seconds.
 pub fn duration(secs: f64) -> String {
     if secs < 1.0 {
@@ -71,6 +82,8 @@ mod tests {
         assert_eq!(si(0.0, "V", 4), "0.000 V");
         assert_eq!(si(-0.5, "A", 3), "-500 mA");
         assert_eq!(si(4.7e-6, "F", 3), "4.70 µF");
+        assert_eq!(placeholder(3, 2), "--.---");
+        assert_eq!(placeholder(0, 1), "-");
     }
 
     #[test]
