@@ -102,7 +102,16 @@ impl DmmRate {
         match self {
             DmmRate::Fast => "RATE F",
             DmmRate::Medium => "RATE M",
-            DmmRate::Slow => "RATE L",
+            DmmRate::Slow => "RATE S",
+        }
+    }
+
+    /// What `RATE?` answers for this rate.
+    pub fn letter(self) -> &'static str {
+        match self {
+            DmmRate::Fast => "F",
+            DmmRate::Medium => "M",
+            DmmRate::Slow => "S",
         }
     }
 }

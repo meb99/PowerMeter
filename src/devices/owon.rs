@@ -2,15 +2,15 @@
 //!
 //! The meter answers `MEAS?` (some firmware only `MEAS1?`) with the value on
 //! the main display in plain scientific notation (`8.924057E-01`). We poll
-//! every [`POLL_PERIOD`] and check `FUNC?` once a second so a key pressed on
-//! the meter would be picked up.
+//! every [`POLL_PERIOD`] and ask `FUNC?` every [`FUNC_PERIOD`], so a key
+//! pressed on the meter shows up in the app.
 //!
-//! Remote mode: a real XDM1241 (Windows, 2026-11) answered `*IDN?` but stayed
-//! silent on `FUNC?` unless `SYST:REM` came first, so we always send
-//! `SYST:REM` right after `*IDN?`, as the first version did. That locks the
-//! meter's keys while connected; the function is switched in the app, and
-//! `SYST:LOC` gives the keys back when disconnecting. A meter that never
-//! answers `FUNC?` still works: the function then follows the app's buttons.
+//! Remote mode: `SYST:REM` locks the meter's keys. A real XDM1241 (firmware
+//! V4.5.0, 2026-11) answers every query without it, but goes silent when it
+//! gets a setting (`RATE F`) while not in remote mode. So we query without
+//! remote mode and wrap each setting in `SYST:REM` … `SYST:LOC`: the keys are
+//! locked only for that moment. A meter that answers only in remote mode
+//! gets `SYST:REM` for the whole connection (the status line says so).
 //! XDM1041/XDM1241 firmware before V4.3.0 swaps DIOD and CONT in the `FUNC?`
 //! reply (setting them with `CONF:` works); [`swaps_diod_cont`] undoes that.
 
@@ -28,6 +28,9 @@ use crate::model::{ConnState, DmmFunction, Shared};
 /// Shortest time between two readings (at most 50 per second, as
 /// rusty_meter polls), so the meter is never queried back to back.
 pub const POLL_PERIOD: Duration = Duration::from_millis(20);
+
+/// How often we ask which function is selected on the meter.
+pub const FUNC_PERIOD: Duration = Duration::from_millis(500);
 
 /// How long the meter may take to answer a query.
 const ANSWER_TIMEOUT: Duration = Duration::from_millis(1500);
@@ -110,17 +113,23 @@ fn session(
 
     let idn = link.query("*IDN?").map_err(|e| e.to_string())?;
     let swap_diod_cont = swaps_diod_cont(&idn);
-    link.send("SYST:REM").map_err(|e| e.to_string())?;
-    link.send(rate.scpi()).map_err(|e| e.to_string())?;
-    link.drain();
-
     let read_func = |answer: &str| match DmmFunction::from_scpi(answer) {
         DmmFunction::Cont if swap_diod_cont => DmmFunction::Diode,
         DmmFunction::Diode if swap_diod_cont => DmmFunction::Cont,
         f => f,
     };
+
+    // First without remote mode, so the keys stay usable. Nothing is set
+    // before this: a setting outside remote mode silences the XDM1241.
+    let mut locked = false;
+    let mut func = link.try_query("FUNC?").map_err(|e| e.to_string())?;
+    if func.is_none() {
+        link.send("SYST:REM").map_err(|e| e.to_string())?;
+        link.drain();
+        locked = true;
+        func = link.try_query("FUNC?").map_err(|e| e.to_string())?;
+    }
     // FUNC? is a nice-to-have: without it the function follows the app.
-    let func = link.try_query("FUNC?").map_err(|e| e.to_string())?;
     let func_supported = func.is_some();
     // MEAS? on most firmware, MEAS1? on some.
     let mut meas_cmd = "MEAS?";
@@ -133,10 +142,17 @@ fn session(
         return Err("keine Antwort auf MEAS? und MEAS1?".into());
     }
 
+    // The rate only when it differs (every setting briefly locks the keys).
+    let mut current_rate = link.try_query("RATE?").map_err(|e| e.to_string())?.map(|r| r.trim().to_string());
+    if current_rate.as_deref() != Some(rate.letter()) {
+        apply(&mut link, locked, rate.scpi())?;
+        current_rate = Some(rate.letter().to_string());
+    }
+
     let model = idn.split(',').take(2).map(str::trim).collect::<Vec<_>>().join(" ");
     {
         let mut s = store.lock().unwrap();
-        s.dmm.conn = ConnState::Connected(format!("{model} · Tasten am Gerät gesperrt"));
+        s.dmm.conn = ConnState::Connected(if locked { format!("{model} · Tasten am Gerät gesperrt") } else { model });
         if let Some(f) = &func {
             s.set_dmm_function(read_func(f));
         }
@@ -154,21 +170,23 @@ fn session(
                 match rx.try_recv() {
                     Ok(DmmCommand::SetFunction(f)) => {
                         if let Some(cmd) = f.scpi_conf() {
-                            link.send(cmd).map_err(|e| e.to_string())?;
-                            link.drain();
+                            apply(&mut link, locked, cmd)?;
                             store.lock().unwrap().set_dmm_function(f);
+                            last_func_check = Instant::now();
                         }
                     }
                     Ok(DmmCommand::SetRate(r)) => {
-                        link.send(r.scpi()).map_err(|e| e.to_string())?;
-                        link.drain();
+                        if current_rate.as_deref() != Some(r.letter()) {
+                            apply(&mut link, locked, r.scpi())?;
+                            current_rate = Some(r.letter().to_string());
+                        }
                     }
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => return Ok(()),
                 }
             }
 
-            if func_supported && last_func_check.elapsed() >= Duration::from_secs(1) {
+            if func_supported && last_func_check.elapsed() >= FUNC_PERIOD {
                 last_func_check = Instant::now();
                 let f = read_func(&link.query("FUNC?").map_err(|e| e.to_string())?);
                 store.lock().unwrap().set_dmm_function(f);
@@ -188,8 +206,24 @@ fn session(
         Ok(())
     })();
 
-    let _ = link.send("SYST:LOC");
+    if locked {
+        let _ = link.send("SYST:LOC");
+    }
     result
+}
+
+/// Sends a setting. Outside remote mode it is wrapped in `SYST:REM` …
+/// `SYST:LOC` (see the module docs), so the keys are free again right after.
+fn apply(link: &mut Link, locked: bool, cmd: &str) -> Result<(), String> {
+    if !locked {
+        link.send("SYST:REM").map_err(|e| e.to_string())?;
+    }
+    link.send(cmd).map_err(|e| e.to_string())?;
+    link.drain();
+    if !locked {
+        link.send("SYST:LOC").map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 /// `powermeter --probe-xdm <port>` and the app's "Multimeter prüfen": asks
@@ -342,6 +376,9 @@ mod tests {
         /// Answers queries other than `*IDN?` only after `SYST:REM`, like
         /// the XDM1241 on Müco's bench.
         needs_remote: bool,
+        /// A setting outside remote mode silences it until the port is
+        /// opened again, like the XDM1241 on Müco's bench.
+        silenced_by_local_setting: bool,
         answers_func: bool,
         answers_meas: bool,
         answers_meas1: bool,
@@ -358,6 +395,8 @@ mod tests {
         use std::io::{Read, Write};
         std::thread::spawn(move || {
             let mut remote = false;
+            let mut silenced = false;
+            let mut rate = "F".to_string();
             let mut buf = Vec::new();
             while !done.load(Ordering::Relaxed) {
                 let mut chunk = [0u8; 256];
@@ -369,7 +408,15 @@ mod tests {
                     let line: Vec<u8> = buf.drain(..=pos).collect();
                     let cmd = String::from_utf8_lossy(&line).trim().to_string();
                     log.lock().unwrap().push(cmd.clone());
-                    let listening = remote || !fake.needs_remote;
+                    let is_setting = !cmd.ends_with('?') && !cmd.starts_with("SYST:");
+                    if is_setting && !remote && fake.silenced_by_local_setting {
+                        silenced = true;
+                    }
+                    if let Some(r) = cmd.strip_prefix("RATE ") {
+                        rate = r.to_string();
+                    }
+                    let listening = (remote || !fake.needs_remote) && !silenced;
+                    let rate_answer = rate.clone();
                     let answer = match cmd.as_str() {
                         "*IDN?" => Some("OWON,XDM1241,2330123,V4.3.0,3"),
                         "SYST:REM" => {
@@ -383,6 +430,7 @@ mod tests {
                         "FUNC?" if listening && fake.answers_func => Some("\"VOLT\""),
                         "MEAS?" if listening && fake.answers_meas => Some("1.234567E+00"),
                         "MEAS1?" if listening && fake.answers_meas1 => Some("2.345678E+00"),
+                        "RATE?" if listening => Some(rate_answer.as_str()),
                         _ => None,
                     };
                     if let Some(a) = answer {
@@ -415,21 +463,32 @@ mod tests {
         (result, log)
     }
 
-    /// One session against the fake until a few readings arrived:
-    /// (log, status label, readings, last reading).
+    /// One session against the fake: waits for 3 readings, sends `cmds`,
+    /// waits for 3 more. Returns (log, status label, readings, last reading).
     #[cfg(unix)]
-    fn session_against(fake: Fake) -> (Vec<String>, String, usize, f64) {
+    fn session_against(fake: Fake, cmds: Vec<DmmCommand>) -> (Vec<String>, String, usize, f64) {
         let store = crate::model::Store::shared();
         let ((), log) = with_fake(fake, |port| {
-            let (_tx, rx) = std::sync::mpsc::channel();
+            let (tx, rx) = std::sync::mpsc::channel();
             let stop = Arc::new(AtomicBool::new(false));
             let worker = {
                 let (store, stop) = (store.clone(), stop.clone());
                 std::thread::spawn(move || session(port, DmmRate::Fast, &store, &egui::Context::default(), &rx, &stop))
             };
-            let deadline = Instant::now() + Duration::from_secs(8);
-            while Instant::now() < deadline && store.lock().unwrap().dmm.samples.len() < 3 {
-                std::thread::sleep(Duration::from_millis(10));
+            let wait_for = |n: usize| {
+                let deadline = Instant::now() + Duration::from_secs(8);
+                while Instant::now() < deadline && store.lock().unwrap().dmm.samples.len() < n {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            };
+            wait_for(3);
+            let before = store.lock().unwrap().dmm.samples.len();
+            let sent = !cmds.is_empty();
+            for c in cmds {
+                tx.send(c).unwrap();
+            }
+            if sent {
+                wait_for(before + 3);
             }
             stop.store(true, Ordering::Relaxed);
             let result = worker.join().unwrap();
@@ -445,31 +504,91 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn remote_comes_before_the_first_question() {
-        let fake = Fake { needs_remote: true, answers_func: true, answers_meas: true, answers_meas1: true };
-        let (log, label, n, last) = session_against(fake);
-        assert!(n >= 3, "{log:?}");
+    fn keys_stay_free_and_settings_are_wrapped_in_remote() {
+        let fake = Fake {
+            needs_remote: false,
+            silenced_by_local_setting: true,
+            answers_func: true,
+            answers_meas: true,
+            answers_meas1: true,
+        };
+        let cmds = vec![DmmCommand::SetRate(DmmRate::Fast), DmmCommand::SetFunction(DmmFunction::Res)];
+        let (log, label, n, last) = session_against(fake, cmds);
+        assert!(n >= 6, "readings went on after the setting: {log:?}");
         assert_eq!(last, 1.234567);
-        assert_eq!(&log[..3], ["*IDN?", "SYST:REM", "RATE F"], "{log:?}");
+        assert_eq!(label, "OWON XDM1241");
+        // nothing locks the keys before the meter has been asked
+        let first_rem = log.iter().position(|c| c == "SYST:REM").expect("CONF wrapped");
+        assert!(log[..first_rem].contains(&"FUNC?".to_string()), "{log:?}");
+        assert_eq!(&log[first_rem..first_rem + 3], ["SYST:REM", "CONF:RES AUTO", "SYST:LOC"], "{log:?}");
+        // the rate already was F: not sent again
+        assert!(!log.iter().any(|c| c.starts_with("RATE ")), "{log:?}");
+        assert_eq!(log.iter().filter(|c| *c == "SYST:REM").count(), 1, "{log:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_different_rate_is_set_in_remote_mode() {
+        let fake = Fake {
+            needs_remote: false,
+            silenced_by_local_setting: true,
+            answers_func: true,
+            answers_meas: true,
+            answers_meas1: true,
+        };
+        let (log, label, n, _) = session_against(fake, vec![DmmCommand::SetRate(DmmRate::Slow)]);
+        assert!(n >= 6, "{log:?}");
+        assert_eq!(label, "OWON XDM1241");
+        let i = log.iter().position(|c| c == "RATE S").expect("rate sent");
+        assert_eq!(&log[i - 1..=i + 1], ["SYST:REM", "RATE S", "SYST:LOC"], "{log:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn falls_back_to_remote_for_a_meter_that_needs_it() {
+        let fake = Fake {
+            needs_remote: true,
+            silenced_by_local_setting: false,
+            answers_func: true,
+            answers_meas: true,
+            answers_meas1: true,
+        };
+        let (log, label, n, last) = session_against(fake, vec![DmmCommand::SetFunction(DmmFunction::Res)]);
+        assert!(n >= 6, "{log:?}");
+        assert_eq!(last, 1.234567);
         assert_eq!(label, "OWON XDM1241 · Tasten am Gerät gesperrt");
+        assert_eq!(&log[..4], ["*IDN?", "FUNC?", "SYST:REM", "FUNC?"], "{log:?}");
         assert_eq!(log.last().map(String::as_str), Some("SYST:LOC"), "{log:?}");
     }
 
     #[cfg(unix)]
     #[test]
     fn works_without_func_and_with_meas1_only() {
-        let fake = Fake { needs_remote: true, answers_func: false, answers_meas: false, answers_meas1: true };
-        let (log, _, n, last) = session_against(fake);
+        let fake = Fake {
+            needs_remote: true,
+            silenced_by_local_setting: false,
+            answers_func: false,
+            answers_meas: false,
+            answers_meas1: true,
+        };
+        let (log, _, n, last) = session_against(fake, Vec::new());
         assert!(n >= 3, "{log:?}");
         assert_eq!(last, 2.345678);
-        assert_eq!(log.iter().filter(|c| *c == "FUNC?").count(), 1, "FUNC? asked once only: {log:?}");
+        // asked without and with remote mode at the start, never again
+        assert_eq!(log.iter().filter(|c| *c == "FUNC?").count(), 2, "{log:?}");
         assert_eq!(log.iter().filter(|c| *c == "MEAS?").count(), 1, "{log:?}");
     }
 
     #[cfg(unix)]
     #[test]
     fn probe_shows_the_raw_answers() {
-        let fake = Fake { needs_remote: true, answers_func: true, answers_meas: true, answers_meas1: false };
+        let fake = Fake {
+            needs_remote: true,
+            silenced_by_local_setting: false,
+            answers_func: true,
+            answers_meas: true,
+            answers_meas1: false,
+        };
         let (result, log) = with_fake(fake, |port| {
             let mut out = Vec::new();
             let r = probe(port, &mut out);
