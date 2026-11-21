@@ -1,0 +1,1268 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<title>Overlay-Studio · PowerMeter</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #131519; --panel: #1b1e23; --panel2: #23272d; --panel3: #2c3138; --line: #323840; --line2: #3e454f;
+    --text: #e9ebee; --muted: #9aa2ac; --faint: #6c747e; --accent: #4cc9f0; --accent-ink: #032029;
+    --ok: #30d158; --warn: #ffb000; --err: #ff5a52; --r: 10px;
+    --ui: -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", system-ui, "Helvetica Neue", Arial, sans-serif;
+    --mono: "SF Mono", "Cascadia Mono", Consolas, Menlo, "DejaVu Sans Mono", monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body { background: var(--bg); color: var(--text); font: 14px/1.4 var(--ui); -webkit-font-smoothing: antialiased;
+    display: flex; flex-direction: column; height: 100vh; }
+  button, input, select, textarea { font: inherit; color: inherit; }
+  a { color: var(--accent); }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+
+  /* ------------------------------------------------------------ buttons */
+  .btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 32px; padding: 0 12px;
+    border-radius: 8px; border: 1px solid var(--line2); background: var(--panel2); cursor: pointer; white-space: nowrap;
+    text-decoration: none; color: var(--text); font-weight: 500; }
+  .btn:hover:not(:disabled) { background: var(--panel3); border-color: #505965; }
+  .btn:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, summary:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: 1px; }
+  .btn:disabled { opacity: .45; cursor: default; }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 650; }
+  .btn.primary:hover:not(:disabled) { background: #74d7f5; border-color: #74d7f5; }
+  .btn.danger { background: #5a1f1d; border-color: #8a2d29; color: #ffd9d6; }
+  .btn.danger:hover:not(:disabled) { background: #73281f; }
+  .btn.quiet { background: transparent; border-color: transparent; color: var(--muted); }
+  .btn.quiet:hover:not(:disabled) { background: var(--panel2); color: var(--text); }
+  .btn.small { height: 26px; padding: 0 8px; font-size: 12.5px; border-radius: 6px; }
+  .btn.icon { width: 26px; padding: 0; }
+
+  /* ------------------------------------------------------------- header */
+  header { display: flex; align-items: center; gap: 10px 14px; padding: 9px 16px; min-height: 54px; flex-wrap: wrap;
+    background: var(--panel); border-bottom: 1px solid var(--line); }
+  .brand { display: flex; align-items: center; gap: 9px; font-weight: 700; font-size: 15px; margin-right: 6px; }
+  .brand i { width: 22px; height: 22px; border-radius: 6px; flex: none;
+    background: conic-gradient(from 210deg, #00e5ff, #3ddc84, #ffb000, #ff2bd6, #00e5ff); }
+  .brand span { color: var(--muted); font-weight: 500; }
+  .picker { display: flex; align-items: center; gap: 8px; }
+  .picker select { height: 32px; min-width: 190px; max-width: 260px; padding: 0 8px; border-radius: 8px;
+    background: var(--panel2); border: 1px solid var(--line2); font-weight: 600; }
+  .star { color: #ffd60a; font-size: 12.5px; font-weight: 600; white-space: nowrap; }
+  .tools { display: flex; gap: 6px; flex-wrap: wrap; }
+  .spacer { flex: 1; }
+  .save { font-size: 13px; color: var(--muted); white-space: nowrap; min-width: 96px; text-align: right; }
+  .save.ok { color: var(--ok); }
+  .save.err { color: var(--err); white-space: normal; max-width: 340px; }
+
+  /* --------------------------------------------------------------- main */
+  main { display: grid; grid-template-columns: 372px minmax(0, 1fr); flex: 1; min-height: 0; }
+  #side { overflow-y: auto; border-right: 1px solid var(--line); background: var(--panel); padding: 6px 0 40px;
+    scrollbar-width: thin; scrollbar-color: #3a414b transparent; }
+  #right { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+
+  details.sec { border-bottom: 1px solid var(--line); }
+  details.sec > summary { list-style: none; cursor: pointer; padding: 12px 16px; font-weight: 650; display: flex;
+    align-items: center; gap: 8px; user-select: none; }
+  details.sec > summary::-webkit-details-marker { display: none; }
+  details.sec > summary::before { content: ""; width: 7px; height: 7px; border-right: 2px solid var(--muted);
+    border-bottom: 2px solid var(--muted); transform: rotate(-45deg); transition: transform .15s; margin: 0 4px 0 2px; }
+  details.sec[open] > summary::before { transform: rotate(45deg); }
+  details.sec > summary small { color: var(--faint); font-weight: 500; margin-left: auto; font-size: 12px; }
+  .body { padding: 0 16px 16px; display: grid; gap: 12px; }
+  .row { display: grid; gap: 6px; }
+  .row > label, .lab { font-size: 12.5px; color: var(--muted); font-weight: 600; }
+  .row.inline { grid-template-columns: 1fr auto; align-items: center; }
+  .hint { font-size: 12.5px; color: var(--faint); line-height: 1.4; }
+  .hint b { color: var(--muted); font-weight: 600; }
+  .tip { font-size: 12.5px; color: #e9d7a8; background: rgba(255,176,0,.09); border: 1px solid rgba(255,176,0,.25);
+    border-radius: 8px; padding: 7px 10px; }
+
+  input[type=text], select, textarea { width: 100%; background: var(--panel2); border: 1px solid var(--line2);
+    border-radius: 8px; padding: 7px 9px; }
+  select { height: 34px; padding: 0 8px; }
+  textarea { font-family: var(--mono); font-size: 12.5px; min-height: 150px; resize: vertical; }
+  input[type=range] { width: 100%; accent-color: var(--accent); margin: 0; }
+  input[type=checkbox] { accent-color: var(--accent); width: 16px; height: 16px; margin: 0; flex: none; }
+  .check { display: flex; align-items: center; gap: 9px; cursor: pointer; }
+  .check span small { display: block; color: var(--faint); font-size: 12px; }
+  .range { display: grid; grid-template-columns: 1fr 58px; align-items: center; gap: 10px; }
+  .range output { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 12.5px; text-align: right; }
+
+  .seg { display: grid; grid-template-columns: repeat(var(--n, 3), 1fr); gap: 4px; background: var(--panel2);
+    border: 1px solid var(--line2); border-radius: 9px; padding: 3px; }
+  .seg button { border: 0; background: transparent; border-radius: 6px; padding: 6px 4px; cursor: pointer;
+    color: var(--muted); font-size: 12.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .seg button:hover { color: var(--text); background: var(--panel3); }
+  .seg button.on { background: var(--accent); color: var(--accent-ink); }
+
+  /* templates */
+  .tpls { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .tpl { border: 1px solid var(--line2); background: var(--panel2); border-radius: 10px; padding: 0; cursor: pointer;
+    text-align: left; overflow: hidden; display: flex; flex-direction: column; }
+  .tpl:hover { border-color: #5a6470; }
+  .tpl.on { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+  .thumb { height: 70px; display: grid; place-items: center; overflow: hidden; position: relative;
+    background: radial-gradient(ellipse at 70% 30%, rgba(255,170,90,.22), transparent 55%),
+      radial-gradient(ellipse at 20% 80%, rgba(60,140,110,.25), transparent 55%), linear-gradient(160deg, #2a2522, #101316); }
+  .thumb > div { position: absolute; left: 50%; top: 50%; transform-origin: center; }
+  .tpl b { display: block; padding: 6px 9px 1px; font-size: 13px; }
+  .tpl small { display: block; padding: 0 9px 8px; color: var(--faint); font-size: 11.5px; line-height: 1.3; }
+
+  /* elements */
+  .els { display: grid; gap: 3px; }
+  .el { display: grid; grid-template-columns: 1fr auto auto; align-items: center; gap: 8px; padding: 5px 6px 5px 8px;
+    border-radius: 8px; background: var(--panel2); border: 1px solid transparent; }
+  .el.on { border-color: var(--line2); }
+  .el:not(.on) .check span { color: var(--muted); }
+  .el .check { gap: 9px; }
+
+  /* colors */
+  .colors { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
+  .color { display: grid; gap: 4px; font-size: 12px; color: var(--muted); font-weight: 600; }
+  .swatch { display: flex; align-items: center; gap: 6px; background: var(--panel2); border: 1px solid var(--line2);
+    border-radius: 8px; padding: 3px 6px 3px 3px; }
+  .swatch input { width: 26px; height: 24px; border: 0; padding: 0; background: none; cursor: pointer; flex: none; }
+  .swatch input::-webkit-color-swatch-wrapper { padding: 0; }
+  .swatch input::-webkit-color-swatch { border: 1px solid rgba(255,255,255,.2); border-radius: 5px; }
+  .swatch code { font: 11.5px var(--mono); color: var(--muted); }
+  .pair { display: grid; grid-template-columns: auto 1fr; gap: 10px; align-items: center; }
+  .three { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
+
+  /* logo */
+  .drop { border: 1.5px dashed var(--line2); border-radius: 10px; padding: 14px; text-align: center; color: var(--muted);
+    display: grid; gap: 8px; justify-items: center; cursor: pointer; }
+  .drop.over { border-color: var(--accent); background: rgba(76,201,240,.07); color: var(--text); }
+  .drop img[hidden] { display: none; }
+  .drop img { max-height: 64px; max-width: 100%; display: block;
+    background: repeating-conic-gradient(#2a2d33 0 25%, #1f2227 0 50%) 0 0/12px 12px; border-radius: 4px; }
+
+  /* ---------------------------------------------------------- stage bar */
+  .bar { display: flex; align-items: center; gap: 10px 16px; padding: 10px 16px; flex-wrap: wrap;
+    border-bottom: 1px solid var(--line); background: var(--bg); }
+  .bar .group { display: flex; align-items: center; gap: 8px; }
+  .bar .lab { white-space: nowrap; }
+  .bar .seg button { padding: 5px 10px; }
+  .chip { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--muted); padding: 4px 10px;
+    border-radius: 999px; background: var(--panel2); border: 1px solid var(--line); white-space: nowrap; max-width: 250px; }
+  .chip span { overflow: hidden; text-overflow: ellipsis; }
+  .chip i { flex: none; }
+  .chip i { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); }
+  .chip.live i { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
+  .chip.demo i { background: var(--warn); }
+  .chip.down i { background: var(--err); }
+
+  /* ------------------------------------------------------------- stage */
+  #stage { flex: 1; min-height: 0; position: relative; overflow: hidden; display: grid; place-items: center; }
+  .bd-checker { background: repeating-conic-gradient(#2b2e34 0 25%, #1f2226 0 50%) 0 0/24px 24px; }
+  .bd-video { background:
+      radial-gradient(ellipse 40% 50% at 72% 38%, rgba(255,178,102,.42), transparent 70%),
+      radial-gradient(ellipse 45% 40% at 24% 72%, rgba(46,128,96,.55), transparent 70%),
+      radial-gradient(circle at 86% 84%, rgba(90,130,255,.30), transparent 28%),
+      radial-gradient(ellipse 30% 20% at 40% 30%, rgba(255,255,255,.07), transparent 70%),
+      linear-gradient(160deg, #2c2520 0%, #15181b 55%, #0b0d0f 100%); }
+  .bd-light { background:
+      radial-gradient(ellipse 45% 40% at 30% 30%, #ffffff, transparent 70%),
+      radial-gradient(ellipse 40% 35% at 78% 72%, rgba(255,214,150,.55), transparent 70%),
+      linear-gradient(160deg, #f3efe6 0%, #dfe3e8 55%, #c7cdd5 100%); }
+  .bd-green { background: #00b140; }
+  #stage.framed { background: #0c0d10; }
+  #frame { position: relative; overflow: hidden; }
+  #stage:not(.framed) #frame { display: contents; }
+  #stage.framed #frame { box-shadow: 0 0 0 1px #2c3036, 0 10px 40px rgba(0,0,0,.5); border-radius: 2px; }
+  #frame .res { position: absolute; right: 8px; bottom: 6px; font: 11px var(--mono); color: rgba(255,255,255,.55);
+    text-shadow: 0 1px 2px #000; pointer-events: none; }
+  #stage:not(.framed) #frame .res { display: none; }
+  #zoombox { position: relative; }
+  #stage.framed #zoombox { position: absolute; }
+  #zoom { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
+  .zoomlabel { position: absolute; left: 12px; bottom: 10px; font: 11.5px var(--mono); color: rgba(255,255,255,.6);
+    background: rgba(0,0,0,.45); padding: 2px 7px; border-radius: 5px; pointer-events: none; }
+  #stage.light-bd .zoomlabel { color: rgba(0,0,0,.65); background: rgba(255,255,255,.6); }
+
+  /* --------------------------------------------------------------- OBS */
+  .obs { border-top: 1px solid var(--line); background: var(--panel); padding: 12px 16px 14px;
+    display: grid; grid-template-columns: minmax(0, 1.25fr) auto minmax(0, 1fr); gap: 12px 22px; align-items: start; }
+  .obs h2 { margin: 0 0 7px; font-size: 14px; display: flex; align-items: center; gap: 8px; }
+  .obs h2 .badge { font-size: 11px; font-weight: 700; color: #04130a; background: var(--ok); border-radius: 999px; padding: 1px 7px; }
+  .url { display: flex; gap: 6px; }
+  .url input { font-family: var(--mono); font-size: 13px; background: #0f1114; }
+  .dims { display: flex; gap: 8px; }
+  .dim { background: var(--panel2); border: 1px solid var(--line2); border-radius: 9px; padding: 5px 12px; text-align: center;
+    min-width: 82px; }
+  .dim small { display: block; color: var(--muted); font-size: 11.5px; font-weight: 600; }
+  .dim b { font: 700 19px var(--mono); }
+  ol.steps { margin: 0; padding-left: 18px; color: var(--muted); font-size: 12.5px; line-height: 1.5; }
+  ol.steps b { color: var(--text); font-weight: 600; }
+
+  /* ----------------------------------------------------- modal & toast */
+  .modal { position: fixed; inset: 0; background: rgba(5,6,8,.66); display: none; place-items: center; z-index: 20; padding: 16px; }
+  .modal.show { display: grid; }
+  .dialog { width: min(560px, 100%); max-height: calc(100vh - 32px); overflow: auto; background: var(--panel);
+    border: 1px solid var(--line2); border-radius: 14px; padding: 18px; box-shadow: 0 20px 60px rgba(0,0,0,.6); }
+  .dialog.wide { width: min(760px, 100%); }
+  .dialog h3 { margin: 0 0 6px; font-size: 17px; }
+  .dialog p { margin: 0 0 12px; color: var(--muted); }
+  .dialog .tpls { grid-template-columns: repeat(4, 1fr); margin: 4px 0 4px; }
+  .dialog .buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+  #toast { position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%) translateY(20px); opacity: 0; pointer-events: none;
+    transition: .2s; background: #2a2f36; border: 1px solid var(--line2); color: var(--text); padding: 9px 10px 9px 14px;
+    border-radius: 10px; display: flex; align-items: center; gap: 12px; z-index: 30; box-shadow: 0 10px 30px rgba(0,0,0,.5);
+    max-width: calc(100vw - 32px); }
+  #toast.show { opacity: 1; transform: translateX(-50%); pointer-events: auto; }
+  #toast.err { border-color: #8a2d29; background: #3a1d1c; }
+  .blocked { position: fixed; inset: 0; display: none; place-items: center; background: var(--bg); z-index: 40; padding: 24px; text-align: center; }
+  .blocked.show { display: grid; }
+
+  /* ------------------------------------------------------------ narrow */
+  @media (max-width: 1440px) { .brand span, #star { display: none; } }
+  @media (max-width: 1100px) {
+    .obs { grid-template-columns: minmax(0, 1fr) auto; }
+    .obs .how { grid-column: 1 / -1; }
+  }
+  @media (max-width: 900px) {
+    header { padding: 9px 12px; }
+    .picker { flex: 1 1 100%; order: 2; }
+    .picker select { flex: 1; max-width: none; min-width: 0; }
+    .tools { order: 3; }
+    .save { order: 1; margin-left: auto; min-width: 0; }
+    body { height: auto; display: block; }
+    main { display: flex; flex-direction: column; }
+    #right { order: -1; }
+    #stage { flex: none; height: 300px; }
+    #side { overflow: visible; border-right: 0; }
+    .obs { grid-template-columns: 1fr; }
+    .bar { padding: 8px 12px; }
+    .dialog .tpls { grid-template-columns: 1fr 1fr; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand"><i></i>Overlay-Studio <span>PowerMeter</span></div>
+  <div class="picker">
+    <label class="sr" for="design">Design</label>
+    <select id="design" title="Design wählen"></select>
+    <span id="star" class="star" hidden>★ Standard</span>
+  </div>
+  <div class="tools">
+    <button class="btn primary" id="bNew">＋ Neues Design</button>
+    <button class="btn" id="bCopy" title="Eine Kopie dieses Designs anlegen">Kopie</button>
+    <button class="btn" id="bRename">Umbenennen</button>
+    <button class="btn" id="bDefault" title="/overlay zeigt dann dieses Design">Als Standard</button>
+    <button class="btn quiet" id="bDelete">Löschen</button>
+  </div>
+  <div class="spacer"></div>
+  <div id="save" class="save" aria-live="polite"></div>
+  <a class="btn quiet" href="/">Übersicht</a>
+</header>
+
+<main>
+  <aside id="side" aria-label="Einstellungen"></aside>
+  <section id="right">
+    <div class="bar">
+      <div class="group"><span class="lab">Hintergrund</span>
+        <div class="seg" id="backdrop" style="--n:4" role="group" aria-label="Hintergrund der Vorschau"></div></div>
+      <div class="group"><span class="lab">Ansicht</span>
+        <div class="seg" id="view" style="--n:2" role="group" aria-label="Ansicht"></div></div>
+      <div class="spacer"></div>
+      <label class="check" title="Zeigt einen Ablauf mit CC, Einbruch und Kurzschluss"><input type="checkbox" id="demo"><span>Beispielwerte</span></label>
+      <span class="chip" id="source"><i></i><span>…</span></span>
+    </div>
+    <div id="stage" class="bd-video">
+      <div id="frame"><div id="zoombox"><div id="zoom"><div id="preview"></div></div></div><span class="res">1920 × 1080</span></div>
+      <span class="zoomlabel" id="zoomlabel"></span>
+    </div>
+    <div class="obs">
+      <div>
+        <h2>In OBS einfügen <span class="badge">live</span></h2>
+        <div class="url"><label class="sr" for="url">URL</label><input type="text" id="url" readonly>
+          <button class="btn primary" id="bUrl">URL kopieren</button></div>
+        <div class="hint" id="urlhint" style="margin-top:6px"></div>
+      </div>
+      <div>
+        <h2>Größe der Quelle</h2>
+        <div class="dims"><div class="dim"><small>Breite</small><b id="w">–</b></div><div class="dim"><small>Höhe</small><b id="h">–</b></div></div>
+      </div>
+      <div class="how">
+        <h2>So geht's</h2>
+        <ol class="steps">
+          <li>OBS: <b>Quellen → + → Browser</b></li>
+          <li>URL einfügen, <b>Breite</b> und <b>Höhe</b> eintragen</li>
+          <li>„Benutzerdefiniertes CSS“ leeren, <b>OK</b> – fertig. Änderungen hier erscheinen in OBS sofort.</li>
+        </ol>
+      </div>
+    </div>
+  </section>
+</main>
+
+<div class="modal" id="modal"><div class="dialog" id="dialog" role="dialog" aria-modal="true"></div></div>
+<div id="toast" role="status"><span id="toastText"></span></div>
+<div class="blocked" id="blocked"><div><h2>Die PowerMeter-App läuft nicht</h2>
+  <p class="hint">Das Studio braucht die App. Starte PowerMeter und lade diese Seite neu.</p>
+  <button class="btn primary" onclick="location.reload()">Neu laden</button></div></div>
+
+<script src="/overlay.js"></script>
+<script>
+(function () {
+  'use strict';
+  const $ = id => document.getElementById(id);
+  const FONTS = PowerOverlay.fonts;
+  const HDR = { 'X-PowerMeter-Studio': '1' };
+
+  const LAYOUTS = [['meter', 'Messgerät'], ['card', 'Kachel'], ['bar', 'Leiste'],
+    ['minimal', 'Ohne Hintergrund'], ['column', 'Seitenleiste'], ['bench', 'Labornetzteil']];
+  const ELEMENTS = {
+    v: ['Spannung', 'U in Volt'], i: ['Strom', 'I in Ampere'], p: ['Leistung', 'P in Watt'],
+    mode: ['Betriebsart', 'CV · CC · AUS · Schutz'], model: ['Gerätename', 'z. B. OWON SPE3103'],
+    set: ['Soll / Limit', 'Sollspannung und Stromgrenze'], alarms: ['Warnungen', 'nur bei Kurzschluss, Einbruch, Schutz'],
+    graph: ['Graph', 'Verlauf der letzten Sekunden'], title: ['Titel', 'dein Text oben'],
+    logo: ['Logo', 'Bild unter „Logo“ hochladen'], energy: ['Energie', 'Wh · mAh · Spitzenstrom'],
+    events: ['Letztes Ereignis', 'erscheint nach Einbruch oder Kurzschluss'], dmm: ['Multimeter', 'nur wenn eins verbunden ist'],
+  };
+  const COLORS = [['v', 'Spannung'], ['i', 'Strom'], ['p', 'Leistung'], ['dmm', 'Multimeter'], ['cv', 'CV'], ['cc', 'CC'],
+    ['alarm', 'Warnung'], ['text', 'Text'], ['muted', 'Nebentext']];
+  const LOOK_KEYS = ['colors', 'bg_opacity', 'border_opacity', 'border_width', 'radius', 'shadow', 'glow'];
+  const CSS_EXAMPLE = '/* Beispiele – einfach anpassen */\n.panel { border-radius: 4px; }\n.k-v .num { font-size: 72px; }\n.title { letter-spacing: .2em; }\n';
+
+  let templates = [], designs = [], cur = null, cfg = null;
+  let binders = [], dirty = false, saving = false, again = false, saveTimer = 0, measureTimer = 0;
+  let ownRev = null, listRev = null, lastLive = null, demoAuto = true, demoOn = false, demoFeed = null, demoTimer = 0;
+  let ov = null, view = 'near', backdrop = 'video', ovSize = { w: 0, h: 0 }, undoCfg = null;
+  const thumbs = [];
+
+  // --------------------------------------------------------------- api
+
+  async function api(method, path, body) {
+    const opt = { method, headers: Object.assign({}, HDR), cache: 'no-store' };
+    if (body instanceof Blob) opt.body = body;
+    else if (body !== undefined) { opt.headers['Content-Type'] = 'application/json'; opt.body = JSON.stringify(body); }
+    let r;
+    try { r = await fetch(path, opt); } catch (e) { throw new Error('Die App ist nicht erreichbar.'); }
+    let j = null;
+    try { j = await r.json(); } catch (e) { /* no body */ }
+    if (!r.ok) throw new Error((j && j.error) || 'Fehler ' + r.status);
+    return j;
+  }
+
+  function el(tag, cls, text) {
+    const e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text != null) e.textContent = text;
+    return e;
+  }
+
+  function get(path) { return path.split('.').reduce((o, k) => (o == null ? o : o[k]), cfg); }
+  function put(path, value) {
+    const ks = path.split('.');
+    let o = cfg;
+    for (let n = 0; n < ks.length - 1; n++) o = o[ks[n]];
+    o[ks[ks.length - 1]] = value;
+  }
+  const clone = x => JSON.parse(JSON.stringify(x));
+  const isOn = key => cfg.elements.some(e => e.key === key && e.on);
+  // elements that are on and always take room (warnings, events and the
+  // multimeter only appear when there is something to show)
+  const busy = () => cfg.elements.filter(e => e.on && ['alarms', 'events', 'dmm'].indexOf(e.key) < 0).length;
+  function setOn(key, on) {
+    cfg.elements.forEach(e => { if (e.key === key) e.on = on; });
+    if (on) toTop(key);
+  }
+  // Title and logo belong above the numbers: when they are switched on
+  // below everything else, move them up (logo before title).
+  function toTop(key) {
+    if (key !== 'title' && key !== 'logo') return false;
+    const list = cfg.elements;
+    const k = list.findIndex(e => e.key === key);
+    const first = list.findIndex(e => e.on && e.key !== 'logo' && e.key !== 'title');
+    if (first < 0 || k < first) return false;
+    const [x] = list.splice(k, 1);
+    const logo = list.findIndex(e => e.key === 'logo');
+    list.splice(key === 'title' && logo >= 0 && logo < first && list[logo].on ? logo + 1 : first, 0, x);
+    return true;
+  }
+
+  let toastTimer = 0;
+  function toast(text, opts) {
+    opts = opts || {};
+    const t = $('toast');
+    $('toastText').textContent = text;
+    t.querySelectorAll('button').forEach(b => b.remove());
+    if (opts.action) {
+      const b = el('button', 'btn small', opts.action);
+      b.onclick = () => { hideToast(); opts.onAction(); };
+      t.appendChild(b);
+    }
+    t.classList.toggle('err', !!opts.err);
+    t.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(hideToast, opts.ms || 3200);
+  }
+  function hideToast() { $('toast').classList.remove('show'); }
+
+  // ------------------------------------------------------------ dialogs
+
+  function dialog(build) {
+    return new Promise(resolve => {
+      const box = $('dialog');
+      box.className = 'dialog';
+      while (box.firstChild) box.removeChild(box.firstChild);
+      const close = v => { $('modal').classList.remove('show'); document.removeEventListener('keydown', onKey); resolve(v); };
+      const onKey = e => { if (e.key === 'Escape') close(null); };
+      document.addEventListener('keydown', onKey);
+      $('modal').onclick = e => { if (e.target === $('modal')) close(null); };
+      build(box, close);
+      $('modal').classList.add('show');
+      const f = box.querySelector('input[type=text]') || box.querySelector('.btn.primary, .btn.danger');
+      if (f) setTimeout(() => { f.focus(); if (f.select) f.select(); }, 0);
+    });
+  }
+
+  function buttons(box, close, okText, okCls, onOk) {
+    const row = el('div', 'buttons');
+    const cancel = el('button', 'btn', 'Abbrechen');
+    cancel.onclick = () => close(null);
+    const ok = el('button', 'btn ' + (okCls || 'primary'), okText);
+    ok.onclick = onOk;
+    row.append(cancel, ok);
+    box.appendChild(row);
+    return ok;
+  }
+
+  function askName(title, text, value, okText) {
+    return dialog((box, close) => {
+      box.append(el('h3', null, title), el('p', null, text));
+      const inp = el('input');
+      inp.type = 'text'; inp.maxLength = 60; inp.value = value;
+      box.appendChild(inp);
+      const done = () => { const v = inp.value.trim(); if (v) close(v); else inp.focus(); };
+      inp.onkeydown = e => { if (e.key === 'Enter') done(); };
+      buttons(box, close, okText, 'primary', done);
+    });
+  }
+
+  function confirmBox(title, text, okText, danger) {
+    return dialog((box, close) => {
+      box.append(el('h3', null, title), el('p', null, text));
+      buttons(box, close, okText, danger ? 'danger' : 'primary', () => close(true));
+    });
+  }
+
+  // --------------------------------------------------------- templates
+
+  function thumbSample() {
+    return PowerOverlay.demo({ start: 11 }).next();
+  }
+
+  function templateGrid(onPick, selected) {
+    const grid = el('div', 'tpls');
+    const sample = thumbSample();
+    for (const t of templates) {
+      const b = el('button', 'tpl');
+      b.type = 'button';
+      b.dataset.id = t.id;
+      if (t.id === selected) b.classList.add('on');
+      const th = el('div', 'thumb');
+      const wrap = el('div');
+      const host = el('div');
+      wrap.appendChild(host);
+      th.appendChild(wrap);
+      b.append(th, el('b', null, t.name), el('small', null, t.description));
+      b.onclick = () => onPick(t, b);
+      grid.appendChild(b);
+      const entry = { th, wrap, size: { w: 0, h: 0 }, ov: null };
+      entry.ov = PowerOverlay.mount(host, t, { never_stale: true, onResize: s => { entry.size = s; fitThumb(entry); } });
+      entry.ov.update(sample);
+      entry.sample = sample;
+      thumbs.push(entry);
+    }
+    return grid;
+  }
+
+  function fitThumb(e) {
+    const bw = e.th.clientWidth - 10, bh = e.th.clientHeight - 10;
+    if (!e.size.w || bw <= 0) return;
+    const s = Math.min(1, bw / e.size.w, bh / e.size.h);
+    e.wrap.style.width = e.size.w + 'px';
+    e.wrap.style.height = e.size.h + 'px';
+    e.wrap.style.transform = `translate(-50%, -50%) scale(${s})`;
+  }
+
+  function refitThumbs() {
+    thumbs.forEach(e => { if (e.th.isConnected) { e.ov.update(e.sample); fitThumb(e); } });
+  }
+
+  function applyTemplate(t) {
+    const before = clone(cfg);
+    const next = clone(t.cfg);
+    const oldTpl = templates.find(x => x.id === cfg.template);
+    // what the user wrote themselves stays
+    if (cfg.title && (!oldTpl || cfg.title !== oldTpl.cfg.title)) next.title = cfg.title;
+    next.logo = cfg.logo;
+    next.logo_height = cfg.logo_height;
+    if (cfg.logo && isOn('logo')) next.elements.forEach(e => { if (e.key === 'logo') e.on = true; });
+    next.custom_css = cfg.custom_css;
+    cfg = next;
+    undoCfg = before;
+    refresh();
+    changed();
+    toast(`Vorlage „${t.name}“ übernommen.`, {
+      action: 'Rückgängig', ms: 7000,
+      onAction: () => { cfg = undoCfg; undoCfg = null; refresh(); changed(); },
+    });
+  }
+
+  // ---------------------------------------------------------- controls
+
+  function section(title, open, note) {
+    const d = el('details', 'sec');
+    d.open = open;
+    const s = el('summary', null, title);
+    if (note) s.appendChild(el('small', null, note));
+    const body = el('div', 'body');
+    d.append(s, body);
+    $('side').appendChild(d);
+    return body;
+  }
+
+  function row(label, control, cls) {
+    const r = el('div', 'row' + (cls ? ' ' + cls : ''));
+    if (label) {
+      const l = el('label', null, label);
+      if (control.id) l.htmlFor = control.id;
+      r.appendChild(l);
+    }
+    r.appendChild(control);
+    return r;
+  }
+
+  let uid = 0;
+  function check(path, label, sub, after) {
+    const l = el('label', 'check');
+    const c = el('input');
+    c.type = 'checkbox';
+    const t = el('span', null, label);
+    if (sub) t.appendChild(el('small', null, sub));
+    l.append(c, t);
+    c.onchange = () => { put(path, c.checked); if (after) after(c.checked); changed(); };
+    binders.push(() => { c.checked = !!get(path); });
+    return l;
+  }
+
+  function range(path, min, max, step, fmt) {
+    const box = el('div', 'range');
+    const r = el('input');
+    r.type = 'range'; r.min = min; r.max = max; r.step = step; r.id = 'f' + (++uid);
+    const out = el('output');
+    box.append(r, out);
+    r.oninput = () => { put(path, +r.value); out.textContent = fmt(+r.value); changed(); };
+    binders.push(() => { const v = get(path); r.value = v; out.textContent = fmt(+v); });
+    box.id = r.id + 'b';
+    return { box, input: r };
+  }
+
+  function seg(options, getV, setV, n) {
+    const s = el('div', 'seg');
+    s.style.setProperty('--n', n || options.length);
+    s.setAttribute('role', 'group');
+    const bs = options.map(([v, label]) => {
+      const b = el('button', null, label);
+      b.type = 'button';
+      b.title = label;
+      b.onclick = () => { setV(v); sync(); changed(); };
+      s.appendChild(b);
+      return [v, b];
+    });
+    const sync = () => bs.forEach(([v, b]) => b.classList.toggle('on', getV() === v));
+    binders.push(sync);
+    return s;
+  }
+
+  function select(path, options) {
+    const s = el('select');
+    s.id = 'f' + (++uid);
+    for (const [v, label, style] of options) {
+      const o = el('option', null, label);
+      o.value = v;
+      if (style) o.style.fontFamily = style;
+      s.appendChild(o);
+    }
+    s.onchange = () => { put(path, s.value); changed(); };
+    binders.push(() => { s.value = get(path); });
+    return s;
+  }
+
+  function fontSelect(path, numbers) {
+    return select(path, FONTS.filter(f => numbers || !f.numbers_only).map(f => [f.id, f.name, f.numbers_only ? null : f.css]));
+  }
+
+  function colorInput(path, label) {
+    const box = el('label', 'color');
+    box.appendChild(document.createTextNode(label));
+    const sw = el('span', 'swatch');
+    const c = el('input');
+    c.type = 'color';
+    const code = el('code');
+    sw.append(c, code);
+    box.appendChild(sw);
+    c.oninput = () => { put(path, c.value); code.textContent = c.value; changed(); };
+    binders.push(() => { c.value = get(path); code.textContent = get(path); });
+    return box;
+  }
+
+  const pct = v => Math.round(v * 100) + ' %';
+  const px = v => Math.round(v) + ' px';
+
+  function buildControls() {
+    const side = $('side');
+    while (side.firstChild) side.removeChild(side.firstChild);
+    binders = [];
+    thumbs.length = 0;
+
+    // Vorlage & Layout
+    let b = section('Vorlage & Layout', true);
+    b.appendChild(el('div', 'hint', 'Klick auf eine Vorlage übernimmt ihren Look. Dein Titel und Logo bleiben.'));
+    const grid = templateGrid(t => applyTemplate(t), null);
+    b.appendChild(grid);
+    binders.push(() => grid.querySelectorAll('.tpl').forEach(x => x.classList.toggle('on', x.dataset.id === cfg.template)));
+    b.appendChild(row('Layout', seg(LAYOUTS, () => cfg.layout, v => { cfg.layout = v; }, 3)));
+
+    // Elemente
+    b = section('Elemente', true, 'ein / aus, Reihenfolge');
+    const els = el('div', 'els');
+    const tip = el('div', 'tip', 'Tipp: Weniger ist mehr – etwa vier Elemente lesen sich im Video am besten.');
+    b.append(els, tip);
+    binders.push(() => {
+      while (els.firstChild) els.removeChild(els.firstChild);
+      cfg.elements.forEach((e, k) => {
+        const [name, sub] = ELEMENTS[e.key] || [e.key, ''];
+        const r = el('div', 'el' + (e.on ? ' on' : ''));
+        const l = el('label', 'check');
+        const c = el('input');
+        c.type = 'checkbox';
+        c.checked = e.on;
+        const t = el('span', null, name);
+        t.appendChild(el('small', null, sub));
+        l.append(c, t);
+        c.onchange = () => {
+          e.on = c.checked;
+          r.classList.toggle('on', e.on);
+          if (e.on && toTop(e.key)) refresh();
+          tip.hidden = busy() <= 7;
+          if (e.key === 'logo' && e.on && !cfg.logo) toast('Lade unter „Logo“ ein Bild hoch, dann erscheint es.');
+          changed();
+        };
+        const up = el('button', 'btn small icon quiet', '↑');
+        const down = el('button', 'btn small icon quiet', '↓');
+        up.title = name + ' nach oben';
+        down.title = name + ' nach unten';
+        up.disabled = k === 0;
+        down.disabled = k === cfg.elements.length - 1;
+        const move = d => {
+          const list = cfg.elements;
+          const [x] = list.splice(k, 1);
+          list.splice(k + d, 0, x);
+          refresh();
+          changed();
+          const again = els.children[k + d] && els.children[k + d].querySelectorAll('button')[d < 0 ? 0 : 1];
+          if (again && !again.disabled) again.focus();
+        };
+        up.onclick = () => move(-1);
+        down.onclick = () => move(1);
+        r.append(l, up, down);
+        els.appendChild(r);
+      });
+      tip.hidden = busy() <= 7;
+    });
+
+    // Text
+    b = section('Text', false);
+    const title = el('input');
+    title.type = 'text'; title.maxLength = 60; title.id = 'f-title'; title.placeholder = 'z. B. MÜCO REPAIR · NETZTEIL';
+    title.oninput = () => {
+      cfg.title = title.value;
+      if (title.value.trim() && !isOn('title')) { setOn('title', true); refreshExcept(title); }
+      changed();
+    };
+    binders.push(() => { if (document.activeElement !== title) title.value = cfg.title; });
+    b.appendChild(row('Titel', title));
+    b.appendChild(check('labels', 'Beschriftung', 'SPANNUNG · STROM · LEISTUNG über den Zahlen'));
+    b.appendChild(check('units', 'Einheiten', 'V · A · W'));
+    b.appendChild(row('Schrift für Text', fontSelect('font_text', false)));
+
+    // Zahlen
+    b = section('Zahlen', false);
+    b.appendChild(row('Größter Wert', seg([['v', 'Spannung'], ['i', 'Strom'], ['p', 'Leistung'], ['none', 'Alle gleich']],
+      () => cfg.accent, v => { cfg.accent = v; }, 4)));
+    b.appendChild(row('Schrift für Zahlen', fontSelect('font_numbers', true)));
+    const wr = range('weight', 400, 900, 100, v => ({ 400: 'Normal', 500: 'Mittel', 600: 'Halbfett', 700: 'Fett', 800: 'Extrafett', 900: 'Schwarz' })[v] || v);
+    b.appendChild(row('Strichstärke', wr.box));
+    const three = el('div', 'three');
+    for (const [k, name] of [['v', 'Spannung'], ['i', 'Strom'], ['p', 'Leistung']]) {
+      const s = el('select');
+      s.id = 'f-dec-' + k;
+      [['auto', 'Automatisch'], ['0', '0'], ['1', '1'], ['2', '2'], ['3', '3'], ['4', '4']].forEach(([v, l]) => {
+        const o = el('option', null, l);
+        o.value = v;
+        s.appendChild(o);
+      });
+      s.onchange = () => { cfg.decimals[k] = s.value === 'auto' ? 'auto' : +s.value; changed(); };
+      binders.push(() => { s.value = String(cfg.decimals[k]); });
+      three.appendChild(row(name, s));
+    }
+    b.appendChild(el('div', 'lab', 'Nachkommastellen'));
+    b.appendChild(three);
+    b.appendChild(el('div', 'hint', '„Automatisch“ zeigt so viele Stellen, wie das Gerät wirklich misst – beim OWON SPE: 2 / 3 / 2.'));
+    b.appendChild(check('auto_units', 'Kleine Werte in mA / mW', 'z. B. 118 mA statt 0.118 A'));
+    b.appendChild(row('Größe', range('scale', 0.4, 3, 0.05, pct).box));
+
+    // Farben
+    b = section('Farben', false);
+    const cg = el('div', 'colors');
+    COLORS.forEach(([k, name]) => cg.appendChild(colorInput('colors.' + k, name)));
+    b.appendChild(cg);
+    const bgp = el('div', 'pair');
+    bgp.append(colorInput('colors.bg', 'Fläche'), row('Deckkraft', range('bg_opacity', 0, 1, 0.01, pct).box));
+    b.appendChild(row('Hintergrund', bgp));
+    const brp = el('div', 'pair');
+    brp.append(colorInput('colors.border', 'Rahmen'), row('Deckkraft', range('border_opacity', 0, 1, 0.01, pct).box));
+    b.appendChild(row('Rahmen', brp));
+    b.appendChild(row('Rahmenbreite', range('border_width', 0, 8, 1, px).box));
+    b.appendChild(row('Ecken', range('radius', 0, 40, 1, px).box));
+    b.appendChild(check('shadow', 'Schatten', 'hebt die Fläche vom Video ab'));
+    b.appendChild(check('glow', 'Leuchten', 'Zahlen und Rahmen leuchten'));
+    const reset = el('button', 'btn', 'Farben aus Vorlage');
+    reset.onclick = () => {
+      const t = templates.find(x => x.id === cfg.template) || templates[0];
+      const before = clone(cfg);
+      LOOK_KEYS.forEach(k => { cfg[k] = clone(t.cfg[k]); });
+      refresh();
+      changed();
+      toast(`Farben von „${t.name}“ zurückgeholt.`, { action: 'Rückgängig', ms: 7000, onAction: () => { cfg = before; refresh(); changed(); } });
+    };
+    b.appendChild(reset);
+
+    // Graph
+    b = section('Graph', false);
+    const goff = el('div', 'tip');
+    const gon = el('button', 'btn small', 'Einschalten');
+    gon.style.marginLeft = '8px';
+    gon.onclick = () => { setOn('graph', true); refresh(); changed(); };
+    goff.append(document.createTextNode('Der Graph ist unter „Elemente“ aus.'), gon);
+    b.appendChild(goff);
+    binders.push(() => { goff.hidden = isOn('graph'); });
+    const sr = el('div', 'three');
+    for (const [k, name] of [['v', 'Spannung'], ['i', 'Strom'], ['p', 'Leistung']]) {
+      const l = el('label', 'check');
+      const c = el('input');
+      c.type = 'checkbox';
+      l.append(c, el('span', null, name));
+      c.onchange = () => {
+        const s = cfg.graph.series.filter(x => x !== k);
+        if (c.checked) s.push(k);
+        cfg.graph.series = ['v', 'i', 'p'].filter(x => s.indexOf(x) >= 0);
+        changed();
+      };
+      binders.push(() => { c.checked = cfg.graph.series.indexOf(k) >= 0; });
+      sr.appendChild(l);
+    }
+    b.appendChild(row('Kurven', sr));
+    const secs = range('graph.seconds', 5, 60, 1, v => v + ' s');
+    const quick = el('div', 'seg');
+    quick.style.setProperty('--n', 2);
+    const q = [20, 60].map(s => {
+      const qb = el('button', null, s + ' s');
+      qb.type = 'button';
+      qb.onclick = () => { cfg.graph.seconds = s; refresh(); changed(); };
+      quick.appendChild(qb);
+      return [s, qb];
+    });
+    binders.push(() => q.forEach(([s, qb]) => qb.classList.toggle('on', cfg.graph.seconds === s)));
+    const sp = el('div', 'pair');
+    sp.style.gridTemplateColumns = '110px 1fr';
+    sp.append(quick, secs.box);
+    b.appendChild(row('Zeitraum', sp));
+    b.appendChild(row('Breite', range('graph.width', 120, 1200, 10, px).box));
+    b.appendChild(row('Höhe', range('graph.height', 30, 240, 2, px).box));
+    b.appendChild(row('Linienstärke', range('graph.line', 1, 6, 0.5, v => v + ' px').box));
+    b.appendChild(check('graph.axes', 'Achsen mit Werten', 'Spannung links, Strom rechts'));
+    b.appendChild(check('graph.setpoints', 'Soll- und Limit-Linien', 'gestrichelt'));
+    b.appendChild(check('graph.legend', 'Legende'));
+    b.appendChild(check('graph.fill', 'Fläche unter der Kurve füllen'));
+
+    // Logo
+    b = section('Logo', false);
+    const drop = el('div', 'drop');
+    drop.tabIndex = 0;
+    drop.setAttribute('role', 'button');
+    const img = el('img');
+    img.alt = 'Logo';
+    const dt = el('div', null, 'Bild hierher ziehen oder klicken');
+    const ds = el('div', 'hint', 'PNG, JPG, GIF, WEBP oder SVG, höchstens 5 MB. Am besten mit transparentem Hintergrund.');
+    drop.append(img, dt, ds);
+    const file = el('input');
+    file.type = 'file';
+    file.accept = 'image/png,image/jpeg,image/gif,image/webp,image/svg+xml';
+    file.hidden = true;
+    drop.onclick = () => file.click();
+    drop.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); file.click(); } };
+    file.onchange = () => { if (file.files[0]) upload(file.files[0]); file.value = ''; };
+    drop.ondragover = e => { e.preventDefault(); drop.classList.add('over'); };
+    drop.ondragleave = () => drop.classList.remove('over');
+    drop.ondrop = e => {
+      e.preventDefault();
+      drop.classList.remove('over');
+      const f = e.dataTransfer.files && e.dataTransfer.files[0];
+      if (f) upload(f);
+    };
+    const rm = el('button', 'btn', 'Logo entfernen');
+    rm.onclick = () => { cfg.logo = null; setOn('logo', false); refresh(); changed(); };
+    binders.push(() => {
+      img.hidden = !cfg.logo;
+      if (cfg.logo) img.src = '/assets/' + encodeURIComponent(cfg.logo);
+      dt.textContent = cfg.logo ? 'Anderes Bild hierher ziehen oder klicken' : 'Bild hierher ziehen oder klicken';
+      rm.hidden = !cfg.logo;
+    });
+    b.append(drop, file, row('Höhe', range('logo_height', 16, 200, 2, px).box), rm);
+
+    // Verhalten
+    b = section('Verhalten', false);
+    b.appendChild(check('alarm_flash', 'Bei Warnungen blinken', 'Kurzschluss, Einbruch, Schutzabschaltung'));
+    b.appendChild(check('hide_when_disconnected', 'Ausblenden, wenn kein Gerät verbunden ist', 'sonst wird es nur blasser'));
+
+    // Profi
+    b = section('Profi: eigenes CSS', false);
+    const ta = el('textarea');
+    ta.id = 'f-css';
+    ta.spellcheck = false;
+    ta.placeholder = CSS_EXAMPLE;
+    ta.oninput = () => { cfg.custom_css = ta.value; changed(); };
+    binders.push(() => { if (document.activeElement !== ta) ta.value = cfg.custom_css; });
+    b.appendChild(row('CSS', ta));
+    const ex = el('button', 'btn small', 'Beispiel einfügen');
+    ex.onclick = () => { ta.value = (ta.value ? ta.value + '\n' : '') + CSS_EXAMPLE; cfg.custom_css = ta.value; changed(); };
+    b.appendChild(ex);
+    const h = el('div', 'hint');
+    h.append(document.createTextNode('Wirkt nur in diesem Overlay. Nützliche Klassen: '), el('b', null, '.panel .num .unit .lbl .title .pill .graph'),
+      document.createTextNode(', pro Wert '), el('b', null, '.k-v .k-i .k-p'), document.createTextNode('. Mehr in docs/OVERLAY.md.'));
+    b.appendChild(h);
+  }
+
+  function refresh() { binders.forEach(f => f()); }
+  function refreshExcept(node) {
+    const keep = node.value;
+    refresh();
+    node.value = keep;
+  }
+
+  async function upload(f) {
+    if (f.size > 5 * 1024 * 1024) { toast('Das Bild ist größer als 5 MB.', { err: true }); return; }
+    toast('Lade Logo hoch …');
+    try {
+      const j = await api('POST', '/api/assets', f);
+      cfg.logo = j.file;
+      setOn('logo', true);
+      refresh();
+      changed();
+      toast('Logo übernommen.');
+    } catch (e) {
+      toast(e.message, { err: true, ms: 6000 });
+    }
+  }
+
+  // ------------------------------------------------------------ saving
+
+  function setSave(state, msg) {
+    const s = $('save');
+    s.className = 'save ' + state;
+    s.textContent = state === 'ok' ? 'Gespeichert ✓' : state === 'err' ? 'Nicht gespeichert: ' + msg
+      : state === 'saving' ? 'Speichert …' : state === 'pending' ? 'Änderung …' : '';
+  }
+
+  function changed() {
+    dirty = true;
+    renderPreview();
+    setSave('pending');
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(saveNow, 400);
+    clearTimeout(measureTimer);
+    measureTimer = setTimeout(measure, 300);
+  }
+
+  async function saveNow() {
+    clearTimeout(saveTimer);
+    if (!dirty || !cur) return;
+    if (saving) { again = true; return; }
+    saving = true;
+    dirty = false;
+    setSave('saving');
+    const id = cur.id;
+    const sent = JSON.stringify(cfg);
+    try {
+      const j = await api('PUT', '/api/designs/' + encodeURIComponent(id), { name: cur.name, cfg });
+      ownRev = j.rev;
+      if (cur.id === id && !dirty && JSON.stringify(j.cfg) !== sent) {
+        cfg = j.cfg;
+        refresh();
+        renderPreview();
+      }
+      setSave(dirty ? 'pending' : 'ok');
+    } catch (e) {
+      setSave('err', e.message);
+    }
+    saving = false;
+    if (again) { again = false; if (dirty) saveNow(); }
+  }
+
+  async function flush() {
+    if (dirty) await saveNow();
+    while (saving) await new Promise(r => setTimeout(r, 50));
+  }
+
+  window.addEventListener('beforeunload', e => {
+    if (dirty) { saveNow(); e.preventDefault(); e.returnValue = ''; }
+  });
+
+  // ----------------------------------------------------------- designs
+
+  async function loadList() {
+    const j = await api('GET', '/api/designs');
+    designs = j.designs;
+    listRev = j.rev;
+    const s = $('design');
+    while (s.firstChild) s.removeChild(s.firstChild);
+    for (const d of designs) {
+      const o = el('option', null, d.name + (d.is_default ? '  ★' : ''));
+      o.value = d.id;
+      s.appendChild(o);
+    }
+    if (cur) s.value = cur.id;
+    return j;
+  }
+
+  async function openDesign(id) {
+    await flush();
+    const j = await api('GET', '/api/designs/' + encodeURIComponent(id));
+    cur = j;
+    cfg = j.cfg;
+    ownRev = j.rev;
+    undoCfg = null;
+    history.replaceState(null, '', '/studio/' + encodeURIComponent(j.id));
+    $('design').value = j.id;
+    showDesignInfo();
+    refresh();
+    renderPreview(true);
+    measure();
+    setSave('');
+  }
+
+  function showDesignInfo() {
+    const d = designs.find(x => x.id === cur.id);
+    cur.is_default = d ? d.is_default : cur.is_default;
+    $('star').hidden = !cur.is_default;
+    $('bDefault').disabled = cur.is_default;
+    $('bDefault').textContent = cur.is_default ? 'Ist Standard' : 'Als Standard';
+    $('bDelete').disabled = cur.is_default;
+    $('bDelete').title = cur.is_default
+      ? 'Das Standard-Design kann nicht gelöscht werden. Mach erst ein anderes zum Standard.' : 'Dieses Design löschen';
+    $('url').value = cur.url;
+    const hint = $('urlhint');
+    while (hint.firstChild) hint.removeChild(hint.firstChild);
+    if (cur.is_default) {
+      hint.append(document.createTextNode('Das ist dein Standard-Design: auch '), el('b', null, '/overlay'),
+        document.createTextNode(' zeigt es.'));
+    } else {
+      hint.textContent = 'Jedes Design hat seine eigene URL – du kannst mehrere gleichzeitig in OBS nutzen.';
+    }
+    document.title = cur.name + ' · Overlay-Studio';
+  }
+
+  async function newDesign() {
+    let pick = templates[0];
+    const res = await dialog((box, close) => {
+      box.className = 'dialog wide';
+      box.append(el('h3', null, 'Neues Design'), el('p', null, 'Such dir eine Vorlage aus – alles lässt sich danach anpassen.'));
+      const inp = el('input');
+      inp.type = 'text'; inp.maxLength = 60; inp.value = 'Mein Overlay';
+      box.appendChild(row('Name', inp));
+      const grid = templateGrid((t, b) => {
+        pick = t;
+        grid.querySelectorAll('.tpl').forEach(x => x.classList.toggle('on', x === b));
+      }, pick.id);
+      grid.style.marginTop = '12px';
+      box.appendChild(grid);
+      const done = () => { const v = inp.value.trim(); if (v) close({ name: v, template: pick.id }); else inp.focus(); };
+      inp.onkeydown = e => { if (e.key === 'Enter') done(); };
+      buttons(box, close, 'Anlegen', 'primary', done);
+      setTimeout(refitThumbs, 0);
+    });
+    if (!res) return;
+    try {
+      await flush();
+      const j = await api('POST', '/api/designs', res);
+      await loadList();
+      await openDesign(j.id);
+      toast(`„${j.name}“ angelegt.`);
+    } catch (e) { toast(e.message, { err: true, ms: 6000 }); }
+  }
+
+  async function copyDesign() {
+    const name = await askName('Kopie anlegen', 'Wie soll die Kopie heißen?', cur.name + ' (Kopie)', 'Kopie anlegen');
+    if (!name) return;
+    try {
+      await flush();
+      const j = await api('POST', '/api/designs', { name, copy_of: cur.id });
+      await loadList();
+      await openDesign(j.id);
+      toast(`„${j.name}“ angelegt.`);
+    } catch (e) { toast(e.message, { err: true, ms: 6000 }); }
+  }
+
+  async function renameDesign() {
+    const name = await askName('Umbenennen', 'Die URL für OBS bleibt gleich.', cur.name, 'Umbenennen');
+    if (!name || name === cur.name) return;
+    try {
+      await flush();
+      const j = await api('PUT', '/api/designs/' + encodeURIComponent(cur.id), { name, cfg });
+      cur.name = j.name;
+      ownRev = j.rev;
+      await loadList();
+      showDesignInfo();
+      toast('Umbenannt.');
+    } catch (e) { toast(e.message, { err: true, ms: 6000 }); }
+  }
+
+  async function deleteDesign() {
+    const ok = await confirmBox(`„${cur.name}“ löschen?`,
+      'Das Design ist danach weg. Steckt seine URL noch in OBS, zeigt die Quelle einen Hinweis.', 'Löschen', true);
+    if (!ok) return;
+    try {
+      clearTimeout(saveTimer);
+      dirty = false;
+      const j = await api('DELETE', '/api/designs/' + encodeURIComponent(cur.id));
+      ownRev = j.rev;
+      cur = null;
+      await loadList();
+      await openDesign(j.default_id);
+      toast('Gelöscht.');
+    } catch (e) { toast(e.message, { err: true, ms: 6000 }); }
+  }
+
+  async function makeDefault() {
+    try {
+      await flush();
+      const j = await api('POST', '/api/designs/' + encodeURIComponent(cur.id) + '/default');
+      ownRev = j.rev;
+      await loadList();
+      showDesignInfo();
+      toast('/overlay zeigt jetzt dieses Design.');
+    } catch (e) { toast(e.message, { err: true, ms: 6000 }); }
+  }
+
+  // ------------------------------------------------------------ preview
+
+  function renderPreview(rebuild) {
+    if (!cfg) return;
+    if (!ov) {
+      ov = PowerOverlay.mount($('preview'), cfg, { onResize: s => { ovSize = s; layoutStage(); } });
+    } else {
+      ov.setDesign(cfg);
+    }
+    feedOnce();
+    if (rebuild) layoutStage();
+  }
+
+  function layoutStage() {
+    const stage = $('stage');
+    const frame = $('frame');
+    const box = $('zoombox');
+    const zoom = $('zoom');
+    const { w, h } = ovSize;
+    if (!w || !h) return;
+    const sw = stage.clientWidth, sh = stage.clientHeight;
+    stage.className = (view === 'video' ? 'framed' : 'bd-' + backdrop) + (backdrop === 'light' ? ' light-bd' : '');
+    frame.className = view === 'video' ? 'bd-' + backdrop : '';
+    let z;
+    if (view === 'video') {
+      const fw = Math.max(100, Math.min(sw - 40, (sh - 40) * 16 / 9));
+      const fh = fw * 9 / 16;
+      frame.style.width = fw + 'px';
+      frame.style.height = fh + 'px';
+      z = fw / 1920;
+      const m = 40 * z;
+      const L = cfg.layout;
+      box.style.left = (L === 'column' ? fw - w * z - m : m) + 'px';
+      box.style.top = (L === 'bar' ? fh - h * z - m : m) + 'px';
+      $('zoomlabel').textContent = 'So groß wirkt es im 1080p-Video';
+    } else {
+      frame.style.width = frame.style.height = '';
+      box.style.left = box.style.top = '';
+      z = Math.min(2, (sw - 48) / w, (sh - 48) / h);
+      z = Math.max(0.2, z);
+      $('zoomlabel').textContent = 'Vorschau ' + Math.round(z * 100) + ' %';
+    }
+    box.style.width = w * z + 'px';
+    box.style.height = h * z + 'px';
+    zoom.style.transform = `scale(${z})`;
+    if (ov) ov.setFit(z);
+  }
+
+  function measure() {
+    if (!cfg) return;
+    const s = PowerOverlay.measure(cfg);
+    $('w').textContent = s.w;
+    $('h').textContent = s.h;
+  }
+
+  // -------------------------------------------------------- live / demo
+
+  function feedOnce() {
+    if (!ov) return;
+    if (demoOn) ov.update(demoFeed.next());
+    else if (lastLive) ov.update(lastLive);
+  }
+
+  function setDemo(on, auto) {
+    demoOn = on;
+    if (!auto) demoAuto = false;
+    $('demo').checked = on;
+    clearInterval(demoTimer);
+    if (on) {
+      demoFeed = demoFeed || PowerOverlay.demo({ start: 4 });
+      demoTimer = setInterval(feedOnce, 100);
+    }
+    feedOnce();
+    showSource();
+  }
+
+  function showSource() {
+    const c = $('source');
+    const d = lastLive;
+    const live = d && (d.power_connected || d.dmm_connected);
+    c.className = 'chip ' + (linkDown ? 'down' : demoOn ? 'demo' : live ? 'live' : '');
+    c.lastChild.textContent = linkDown ? 'App nicht erreichbar'
+      : !live ? 'Kein Gerät verbunden'
+      : demoOn ? 'Gerät verbunden' : 'Live' + (d.psu_model ? ': ' + d.psu_model : '');
+    c.title = c.lastChild.textContent;
+  }
+
+  let linkDown = false, startFailed = false;
+  PowerOverlay.connect(d => {
+    lastLive = d;
+    linkDown = false;
+    if (!startFailed) $('blocked').classList.remove('show');
+    const live = d.power_connected || d.dmm_connected;
+    if (demoAuto && demoOn === !!live) setDemo(!live, true);
+    if (!demoOn && ov) ov.update(d);
+    showSource();
+    if (listRev !== null && d.design_rev !== listRev && d.design_rev !== ownRev) {
+      listRev = d.design_rev;
+      onForeignChange();
+    }
+  }, {
+    spark: 60,
+    onDown: () => { linkDown = true; if (ov && !demoOn) ov.setLinkDown(true); showSource(); },
+    onUp: () => { if (ov) ov.setLinkDown(false); },
+  });
+
+  // Somebody else (the start page, another tab) changed designs.
+  async function onForeignChange() {
+    try {
+      await loadList();
+      if (!cur) return;
+      if (!designs.some(x => x.id === cur.id)) {
+        toast('Dieses Design wurde woanders gelöscht.');
+        cur = null;
+        await openDesign(designs.find(x => x.is_default).id);
+        return;
+      }
+      showDesignInfo();
+      if (!dirty && !saving) {
+        const j = await api('GET', '/api/designs/' + encodeURIComponent(cur.id));
+        if (JSON.stringify(j.cfg) !== JSON.stringify(cfg) || j.name !== cur.name) {
+          cur = j; cfg = j.cfg; ownRev = j.rev;
+          showDesignInfo();
+          refresh();
+          renderPreview();
+          measure();
+        }
+      }
+    } catch (e) { /* next snapshot tries again */ }
+  }
+
+  // ---------------------------------------------------------------- copy
+
+  async function copyText(text, input) {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch (e) {
+      input.focus();
+      input.select();
+      document.execCommand('copy');
+    }
+  }
+
+  // --------------------------------------------------------------- start
+
+  function buildBar() {
+    const bd = [['checker', 'Karo'], ['video', 'Video'], ['light', 'Hell'], ['green', 'Grün']];
+    const vw = [['near', 'Nah'], ['video', 'Im Bild']];
+    const mk = (box, opts, getV, setV, tips) => {
+      const bs = opts.map(([v, label], k) => {
+        const b = el('button', null, label);
+        b.type = 'button';
+        if (tips) b.title = tips[k];
+        b.onclick = () => { setV(v); bs.forEach(([x, y]) => y.classList.toggle('on', x === v)); layoutStage(); remember(); };
+        $(box).appendChild(b);
+        return [v, b];
+      });
+      bs.forEach(([x, y]) => y.classList.toggle('on', x === getV()));
+    };
+    mk('backdrop', bd, () => backdrop, v => { backdrop = v; }, ['Karomuster = durchsichtig', 'Dunkles Video', 'Helles Video', 'Greenscreen']);
+    mk('view', vw, () => view, v => { view = v; }, ['Groß zum Gestalten', 'In echter Größe in einem 1080p-Bild']);
+  }
+
+  function remember() {
+    try { localStorage.setItem('pm-studio-view', JSON.stringify({ backdrop, view })); } catch (e) { /* private window */ }
+  }
+
+  async function start() {
+    try {
+      const v = JSON.parse(localStorage.getItem('pm-studio-view') || '{}');
+      if (['checker', 'video', 'light', 'green'].indexOf(v.backdrop) >= 0) backdrop = v.backdrop;
+      if (['near', 'video'].indexOf(v.view) >= 0) view = v.view;
+    } catch (e) { /* defaults */ }
+    buildBar();
+    $('demo').onchange = () => setDemo($('demo').checked, false);
+    $('design').onchange = () => openDesign($('design').value).catch(e => toast(e.message, { err: true }));
+    $('bNew').onclick = newDesign;
+    $('bCopy').onclick = copyDesign;
+    $('bRename').onclick = renameDesign;
+    $('bDelete').onclick = deleteDesign;
+    $('bDefault').onclick = makeDefault;
+    $('bUrl').onclick = async () => { await copyText($('url').value, $('url')); toast('URL kopiert – jetzt in OBS einfügen.'); };
+    window.addEventListener('resize', () => { layoutStage(); refitThumbs(); });
+    setDemo(true, true);
+    try {
+      templates = await api('GET', '/api/templates');
+      const j = await loadList();
+      buildControls();
+      const m = /^\/studio\/([a-z0-9-]{1,40})\/?$/.exec(location.pathname);
+      const want = m && designs.some(d => d.id === m[1]) ? m[1] : j.default_id;
+      await openDesign(want);
+      if (m && want !== m[1]) toast('Dieses Design gibt es nicht – hier ist dein Standard-Design.');
+      if (j.note) toast(j.note, { ms: 9000 });
+      refitThumbs();
+      if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => { measure(); refitThumbs(); });
+    } catch (e) {
+      console.error(e);
+      $('blocked').classList.add('show');
+      startFailed = true;
+    }
+  }
+
+  start();
+})();
+</script>
+</body>
+</html>

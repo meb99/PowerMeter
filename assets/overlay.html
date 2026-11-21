@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<title>PowerMeter Overlay</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!--
+  OBS-Browser-Quelle. /overlay zeigt das Standard-Design, /o/<name> ein
+  bestimmtes Design. Gestaltet wird im Overlay-Studio (/studio); Änderungen
+  erscheinen hier live, ohne die Quelle neu zu laden.
+  Die alten URL-Parameter (/overlay?show=…&layout=bar …) gehen weiterhin,
+  siehe docs/OVERLAY.md.
+-->
+<style>
+  html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }
+  #notice { display: none; margin: 8px; padding: 10px 14px; max-width: 460px; border-radius: 10px;
+    background: rgba(20, 22, 27, .92); color: #f2f4f7; font: 15px/1.4 -apple-system, "Segoe UI", Arial, sans-serif; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<div id="notice"></div>
+<script src="/overlay.js"></script>
+<script>PowerOverlay.boot(document.getElementById('root'), document.getElementById('notice'));</script>
+</body>
+</html>
