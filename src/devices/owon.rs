@@ -6,7 +6,10 @@
 //! a second so pressing a key on the meter is picked up.
 //!
 //! We don't send `SYST:REM`: it locks the meter's keys, and the user should
-//! still be able to switch the function on the meter while filming.
+//! still be able to switch the function on the meter while filming. For the
+//! same reason we send `SYST:LOC` after every setting and never poll back to
+//! back: queried without a pause the meter answers but ignores its keys, so
+//! there is at least [`POLL_PERIOD`] between two `MEAS?`.
 //! XDM1041/XDM1241 firmware before V4.3.0 swaps DIOD and CONT in the `FUNC?`
 //! reply (setting them with `CONF:` works); [`swaps_diod_cont`] undoes that.
 
@@ -19,6 +22,10 @@ use eframe::egui;
 
 use super::{DmmCommand, DmmRate, read_line, stopped};
 use crate::model::{ConnState, DmmFunction, Shared};
+
+/// Shortest time between two `MEAS?` (at most ~33 readings per second),
+/// which leaves the meter time to scan its keys.
+pub const POLL_PERIOD: Duration = Duration::from_millis(30);
 
 pub struct OwonConfig {
     pub port: String,
@@ -92,6 +99,7 @@ fn session(
     let idn = link.query("*IDN?").map_err(|e| e.to_string())?;
     let swap_diod_cont = swaps_diod_cont(&idn);
     link.send(cfg.rate.scpi()).map_err(|e| e.to_string())?;
+    link.send("SYST:LOC").map_err(|e| e.to_string())?;
     link.drain();
 
     let model = idn.split(',').take(2).collect::<Vec<_>>().join(" ");
@@ -100,6 +108,7 @@ fn session(
         s.dmm.conn = ConnState::Connected(model);
     }
     let mut last_func_check = Instant::now() - Duration::from_secs(10);
+    let mut last_poll = Instant::now() - POLL_PERIOD;
 
     let result = (|| -> Result<(), String> {
         while !stopped(stop) {
@@ -108,12 +117,14 @@ fn session(
                     Ok(DmmCommand::SetFunction(f)) => {
                         if let Some(cmd) = f.scpi_conf() {
                             link.send(cmd).map_err(|e| e.to_string())?;
+                            link.send("SYST:LOC").map_err(|e| e.to_string())?;
                             link.drain();
                             store.lock().unwrap().set_dmm_function(f);
                         }
                     }
                     Ok(DmmCommand::SetRate(r)) => {
                         link.send(r.scpi()).map_err(|e| e.to_string())?;
+                        link.send("SYST:LOC").map_err(|e| e.to_string())?;
                         link.drain();
                     }
                     Err(TryRecvError::Empty) => break,
@@ -132,6 +143,11 @@ fn session(
                 store.lock().unwrap().set_dmm_function(f);
             }
 
+            let wait = POLL_PERIOD.saturating_sub(last_poll.elapsed());
+            if !wait.is_zero() {
+                std::thread::sleep(wait);
+            }
+            last_poll = Instant::now();
             let answer = link.query("MEAS?").map_err(|e| e.to_string())?;
             if let Some(v) = parse_reading(&answer) {
                 store.lock().unwrap().push_dmm(v);
