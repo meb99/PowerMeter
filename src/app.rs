@@ -150,6 +150,8 @@ impl Preset {
 struct ProbeRun {
     output: Arc<Mutex<String>>,
     done: Arc<std::sync::atomic::AtomicBool>,
+    /// Multimeter (XDM) instead of the supply.
+    xdm: bool,
 }
 
 /// Collects the probe output for the window and asks for a repaint.
@@ -443,7 +445,43 @@ impl PowerMeterApp {
             ctx.request_repaint();
         });
         if spawned.is_ok() {
-            self.probe = Some(ProbeRun { output, done });
+            self.probe = Some(ProbeRun { output, done, xdm: false });
+        }
+    }
+
+    /// "Multimeter prüfen": asks the XDM a fixed list of questions and
+    /// shows the raw answers (see [`devices::owon::probe`]). Only while the
+    /// app itself is not connected to it.
+    fn start_xdm_probe(&mut self, ctx: &egui::Context) {
+        if self.probe.as_ref().is_some_and(|p| !p.done.load(std::sync::atomic::Ordering::Relaxed)) {
+            return;
+        }
+        if self.settings.dmm_port.is_empty() {
+            self.toast("Erst den Port des Multimeters wählen");
+            return;
+        }
+        let output = Arc::new(Mutex::new(String::new()));
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let port = self.settings.dmm_port.clone();
+        let baud = self.settings.dmm_baud;
+        let mut w = ProbeWriter { out: output.clone(), ctx: ctx.clone() };
+        let d = done.clone();
+        let ctx = ctx.clone();
+        let spawned = std::thread::Builder::new().name("xdm-probe".into()).spawn(move || {
+            use std::io::Write;
+            match devices::owon::probe_port(&port, baud, &mut w) {
+                Err(e) => {
+                    let _ = writeln!(w, "\n✖ {e}");
+                }
+                Ok(()) => {
+                    let _ = writeln!(w, "\n✔ Fertig. Bitte mit „Kopieren“ an Claude schicken.");
+                }
+            }
+            d.store(true, std::sync::atomic::Ordering::Relaxed);
+            ctx.request_repaint();
+        });
+        if spawned.is_ok() {
+            self.probe = Some(ProbeRun { output, done, xdm: true });
         }
     }
 
@@ -452,16 +490,19 @@ impl PowerMeterApp {
         let Some(run) = &self.probe else { return };
         let text = run.output.lock().unwrap().clone();
         let done = run.done.load(std::sync::atomic::Ordering::Relaxed);
+        let xdm = run.xdm;
         let mut open = true;
         let mut copy = false;
         let mut again = false;
-        egui::Window::new("Verbindung prüfen").open(&mut open).default_width(620.0).show(ctx, |ui| {
+        let title = if xdm { "Multimeter prüfen" } else { "Verbindung prüfen" };
+        egui::Window::new(title).open(&mut open).default_width(620.0).show(ctx, |ui| {
             ui.horizontal(|ui| {
                 if done {
-                    ui.label(RichText::new("Fertig – es wurde nur gelesen, nichts verstellt.").color(COL_MUTED));
+                    ui.label(RichText::new("Fertig – keine Messeinstellung wurde verstellt.").color(COL_MUTED));
                 } else {
                     ui.spinner();
-                    ui.label("Frage das Netzteil ab … (dauert ein paar Sekunden, verstellt nichts)");
+                    let what = if xdm { "das Multimeter" } else { "das Netzteil" };
+                    ui.label(format!("Frage {what} ab … (dauert ein paar Sekunden, verstellt nichts)"));
                 }
             });
             egui::ScrollArea::vertical().max_height(360.0).stick_to_bottom(true).show(ui, |ui| {
@@ -480,6 +521,8 @@ impl PowerMeterApp {
         }
         if !open {
             self.probe = None;
+        } else if again && xdm {
+            self.start_xdm_probe(ctx);
         } else if again {
             self.start_probe(ctx);
         }
@@ -1410,6 +1453,17 @@ impl PowerMeterApp {
     }
 
     fn dmm_controls(&mut self, ui: &mut egui::Ui) {
+        if self.settings.dmm_kind == DmmKind::OwonXdm
+            && !self.dmm_running()
+            && ui
+                .button("🔌 Multimeter prüfen")
+                .on_hover_text(
+                    "Stellt dem Multimeter ein paar Fragen und zeigt die Antworten – verstellt keine Messung.",
+                )
+                .clicked()
+        {
+            self.start_xdm_probe(ui.ctx());
+        }
         let current = self.store.lock().unwrap().dmm.function;
         let spm = self.settings.dmm_kind == DmmKind::OwonSpm;
         let functions: &[DmmFunction] = if spm { &DmmFunction::SPM_SELECTABLE } else { &DmmFunction::SELECTABLE };

@@ -14,6 +14,10 @@ fn main() -> eframe::Result {
         attach_console();
         std::process::exit(probe_spm(&args[1..]));
     }
+    if args.first().map(String::as_str) == Some("--probe-xdm") {
+        attach_console();
+        std::process::exit(probe_xdm(&args[1..]));
+    }
     if args.first().map(String::as_str) == Some("--serve-only") {
         attach_console();
         std::process::exit(serve_only(&args[1..]));
@@ -68,6 +72,30 @@ fn probe_spm(args: &[String]) -> i32 {
     let mut out = std::io::stdout();
     let result = devices::owon_spm::probe_port(port, baud, &mut out);
     match result {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("Fehler: {e}");
+            1
+        }
+    }
+}
+
+/// `powermeter --probe-xdm <port> [baud]`: asks an OWON XDM a fixed list of
+/// questions and prints the raw answers (see `devices::owon::probe`).
+fn probe_xdm(args: &[String]) -> i32 {
+    let Some(port) = args.first() else {
+        eprintln!("Aufruf: powermeter --probe-xdm <port> [baud]   z. B. COM4, /dev/cu.usbserial-1420");
+        return 2;
+    };
+    let baud = match args.get(1).map(|b| b.parse::<u32>()) {
+        None => 115_200,
+        Some(Ok(b)) => b,
+        Some(Err(_)) => {
+            eprintln!("Ungültige Baudrate: {}", args[1]);
+            return 2;
+        }
+    };
+    match devices::owon::probe_port(port, baud, &mut std::io::stdout()) {
         Ok(()) => 0,
         Err(e) => {
             eprintln!("Fehler: {e}");
